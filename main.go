@@ -1,11 +1,12 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -28,16 +29,32 @@ type Cluster0Status struct {
 }
 
 type Cluster1General struct {
-	ID       uint8
-	DistLong float64
-	DistLat  float64
-	VrelLong float64
-	VrelLat  float64
-	DynProp  uint8
-	RCS      float64
+	ID         uint8
+	DistLong   float64
+	DistLat    float64
+	VrelLong   float64
+	VrelLat    float64
+	DynProp    uint8
+	RCS        float64
+	Timestamp  int64
+	DeviceName string
 }
 
 type RecordClustering struct {
+	ID         uint8
+	DistLong   float64
+	DistLat    float64
+	VrelLong   float64
+	VrelLat    float64
+	DynProp    uint8
+	RCS        float64
+	Timestamp  uint64
+	DeviceName string
+}
+
+// GetCurrentTimestampMillis returns the current UTC timestamp in milliseconds
+func GetCurrentTimestampMillis() int64 {
+	return time.Now().UTC().UnixMilli()
 }
 
 // CANReader interface defines methods for reading CAN bus data
@@ -63,27 +80,24 @@ type Filter struct {
 	Extend bool
 }
 
-var Cluster0StatusCh = make(chan Cluster0Status, 4)
-var Cluster1GeneralCh = make(chan Cluster1General, 4)
+type Device struct {
+	interfaceNameString string
+	Cluster0StatusCh    chan Cluster0Status
+	Cluster1GeneralCh   chan Cluster1General
+}
 
-// Platform-specific implementations will be in separate files with build tags
+func NewDevice(deviceName string) *Device {
+	d := &Device{}
+	d.interfaceNameString = deviceName
+	d.Cluster0StatusCh = make(chan Cluster0Status, 4)
+	d.Cluster1GeneralCh = make(chan Cluster1General, 4)
+	return d
+}
 
-func main() {
-
+func (d *Device) deviceMainLoop() {
 	// Parse command line arguments
-	interfaceName := flag.String("interface", "can0", "CAN interface name (e.g., can0, vcan0)")
-	bitrate := flag.Int("bitrate", 500000, "CAN bus bitrate (e.g., 500000 for 500kbps)")
-	showHelp := flag.Bool("help", false, "Show help")
-
-	flag.Parse()
-
-	if *showHelp {
-		flag.Usage()
-		os.Exit(0)
-	}
-
-	fmt.Printf("CAN Bus Reader - Cross Platform\n")
-	fmt.Printf("Interface: %s, Bitrate: %d\n", *interfaceName, *bitrate)
+	interfaceName := d.interfaceNameString
+	bitrate := 500000
 
 	// Create CAN reader based on platform
 	reader, err := NewCANReader()
@@ -92,9 +106,9 @@ func main() {
 	}
 
 	// Open the CAN interface
-	err = reader.Open(*interfaceName, *bitrate)
+	err = reader.Open(interfaceName, bitrate)
 	if err != nil {
-		log.Fatalf("Failed to open CAN interface %s: %v", *interfaceName, err)
+		log.Fatalf("Failed to open CAN interface %s: %v", interfaceName, err)
 	}
 	defer reader.Close()
 
@@ -111,13 +125,76 @@ func main() {
 	}
 
 	// Main reading loop
-	go implementFrameData()
-	readLoopFromChannel(frameChan, sigChan)
+	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh)
+	readLoopFromChannel(frameChan, sigChan, d.Cluster0StatusCh, d.Cluster1GeneralCh, d.interfaceNameString)
+}
 
+// Platform-specific implementations will be in separate files with build tags
+
+func ParseCANFrame(frame CANFrame, ch0 chan Cluster0Status, ch1 chan Cluster1General, deviceName string) {
+	var currentTime int64 = GetCurrentTimestampMillis()
+	switch frame.ID {
+
+	// =========================
+	// 0x600 (already implemented)
+	// =========================
+	case 0x600:
+		if len(frame.Data) < 5 {
+			fmt.Println("Invalid data length")
+			return
+		}
+
+		data := frame.Data
+
+		status := Cluster0Status{
+			NofClustersNear:  data[0],
+			NofClustersFar:   data[1],
+			MeasCounter:      uint16(data[3]) | uint16(data[2])<<8,
+			InterfaceVersion: (data[4] >> 4) & 0x0F,
+		}
+		currentTime = GetCurrentTimestampMillis()
+
+		ch0 <- status
+
+	// =========================
+	// 0x701 (NEW)
+	// =========================
+	case 0x701:
+		if len(frame.Data) < 8 {
+			fmt.Println("Invalid data length")
+			return
+		}
+
+		data := frame.Data
+
+		rawID := extractBitsMotorola(data, 0, 8)
+		rawDistLong := extractBitsMotorola(data, 19, 13)
+		rawDistLat := extractBitsMotorola(data, 24, 10)
+		rawVrelLong := extractBitsMotorola(data, 46, 10)
+		rawDynProp := extractBitsMotorola(data, 48, 3)
+		rawVrelLat := extractBitsMotorola(data, 53, 9)
+		rawRCS := extractBitsMotorola(data, 56, 8)
+
+		msg := Cluster1General{
+			ID:         uint8(rawID),
+			DistLong:   float64(rawDistLong)*0.2 - 500.0,
+			DistLat:    float64(rawDistLat)*0.2 - 102.3,
+			VrelLong:   float64(rawVrelLong)*0.25 - 128.0,
+			VrelLat:    float64(rawVrelLat)*0.25 - 64.0,
+			DynProp:    uint8(rawDynProp),
+			RCS:        float64(rawRCS)*0.5 - 64.0,
+			Timestamp:  currentTime,
+			DeviceName: deviceName,
+		}
+
+		ch1 <- msg
+	default:
+		// ignore other IDs
+	}
 }
 
 // readLoopFromChannel continuously reads CAN frames from channel
-func readLoopFromChannel(frameChan <-chan *CANFrame, sigChan chan os.Signal) {
+func readLoopFromChannel(frameChan <-chan *CANFrame, sigChan chan os.Signal, ch0 chan Cluster0Status, ch1 chan Cluster1General, deviceName string) {
 	frameCount := 0
 	startTime := time.Now()
 
@@ -142,41 +219,69 @@ func readLoopFromChannel(frameChan <-chan *CANFrame, sigChan chan os.Signal) {
 			frameCount++
 			//printFrame(frame, frameCount)
 
-			ParseCANFrame(*frame)
+			ParseCANFrame(*frame, ch0, ch1, deviceName)
 		}
 	}
 }
 
-// readLoop continuously reads CAN frames (legacy blocking version)
-func readLoop(reader CANReader, sigChan chan os.Signal) {
-	frameCount := 0
-	startTime := time.Now()
+// Config represents the configuration file structure
+type Config struct {
+	Devices []string `json:"devices"`
+}
 
-	for {
-		select {
-		case <-sigChan:
-			fmt.Printf("\nReceived shutdown signal. Exiting...\n")
-			duration := time.Since(startTime)
-			fmt.Printf("Processed %d frames in %v (%.2f frames/sec)\n",
-				frameCount, duration, float64(frameCount)/duration.Seconds())
-			return
-		default:
-			// Read with 100ms timeout
-			frame, err := reader.Read(100 * time.Millisecond)
-			if err != nil {
-				// Check if it's a timeout error (expected)
-				if err.Error() != "timeout" {
-					log.Printf("Read error: %v", err)
-				}
-				continue
-			}
-
-			frameCount++
-			//printFrame(frame, frameCount)
-
-			ParseCANFrame(*frame)
-		}
+// loadConfig reads the configuration file
+func loadConfig(filename string) (*Config, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
 	}
+
+	var config Config
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func main() {
+	// Load configuration
+	config, err := loadConfig("config.json")
+	if err != nil {
+		log.Fatalf("Failed to load config.json: %v", err)
+	}
+
+	if len(config.Devices) == 0 {
+		log.Fatal("No devices configured in config.json")
+	}
+
+	fmt.Printf("Loaded %d devices from config.json: %v\n", len(config.Devices), config.Devices)
+
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Use WaitGroup to wait for all devices to finish
+	var wg sync.WaitGroup
+
+	// Start each device in a separate goroutine
+	for _, deviceName := range config.Devices {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			device := NewDevice(name)
+			device.deviceMainLoop()
+		}(deviceName)
+	}
+
+	// Wait for shutdown signal
+	<-sigChan
+	fmt.Printf("\nReceived shutdown signal. Exiting...\n")
+
+	// Wait for all device goroutines to finish
+	wg.Wait()
+	fmt.Println("All devices stopped.")
 }
 
 // printFrame prints CAN frame information
@@ -246,74 +351,16 @@ func extractBitsMotorola(data []byte, startBit, length int) uint64 {
 	return result
 }
 
-func ParseCANFrame(frame CANFrame) {
-	switch frame.ID {
-
-	// =========================
-	// 0x600 (already implemented)
-	// =========================
-	case 0x600:
-		if len(frame.Data) < 5 {
-			fmt.Println("Invalid data length")
-			return
-		}
-
-		data := frame.Data
-
-		status := Cluster0Status{
-			NofClustersNear:  data[0],
-			NofClustersFar:   data[1],
-			MeasCounter:      uint16(data[3]) | uint16(data[2])<<8,
-			InterfaceVersion: (data[4] >> 4) & 0x0F,
-		}
-
-		Cluster0StatusCh <- status
-
-	// =========================
-	// 0x701 (NEW)
-	// =========================
-	case 0x701:
-		if len(frame.Data) < 8 {
-			fmt.Println("Invalid data length")
-			return
-		}
-
-		data := frame.Data
-
-		rawID := extractBitsMotorola(data, 0, 8)
-		rawDistLong := extractBitsMotorola(data, 19, 13)
-		rawDistLat := extractBitsMotorola(data, 24, 10)
-		rawVrelLong := extractBitsMotorola(data, 46, 10)
-		rawDynProp := extractBitsMotorola(data, 48, 3)
-		rawVrelLat := extractBitsMotorola(data, 53, 9)
-		rawRCS := extractBitsMotorola(data, 56, 8)
-
-		msg := Cluster1General{
-			ID:       uint8(rawID),
-			DistLong: float64(rawDistLong)*0.2 - 500.0,
-			DistLat:  float64(rawDistLat)*0.2 - 102.3,
-			VrelLong: float64(rawVrelLong)*0.25 - 128.0,
-			VrelLat:  float64(rawVrelLat)*0.25 - 64.0,
-			DynProp:  uint8(rawDynProp),
-			RCS:      float64(rawRCS)*0.5 - 64.0,
-		}
-
-		Cluster1GeneralCh <- msg
-	default:
-		// ignore other IDs
-	}
-}
-
-func implementFrameData() {
+func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General) {
 	// Print header once at the beginning
 	printClusterHeader()
 
 	for {
 		select {
-		case msg := <-Cluster0StatusCh:
+		case msg := <-ch0:
 			fmt.Printf("[0x600] %+v\n", msg)
 
-		case msg := <-Cluster1GeneralCh:
+		case msg := <-ch1:
 			// Use the compact format for real-time updates
 			printCluster1GeneralLine(msg)
 		}
