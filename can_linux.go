@@ -15,6 +15,7 @@ import (
 type LinuxCANReader struct {
 	interfaceName string
 	simulated     bool
+	connected     bool
 
 	// For continuous reading
 	frameChan    chan *CANFrame
@@ -27,6 +28,7 @@ type LinuxCANReader struct {
 func newPlatformCANReader() (CANReader, error) {
 	return &LinuxCANReader{
 		simulated: true,
+		connected: false,
 		frameChan: make(chan *CANFrame, 1000),
 		stopChan:  make(chan struct{}),
 	}, nil
@@ -40,6 +42,7 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	if !r.checkInterfaceExists(interfaceName) {
 		log.Printf("CAN interface %s not found, running in simulation mode", interfaceName)
 		r.simulated = true
+		r.connected = true // Simulation mode is "connected"
 		return nil
 	}
 
@@ -48,19 +51,27 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	if err != nil {
 		log.Printf("Failed to bring up %s: %v, running in simulation mode", interfaceName, err)
 		r.simulated = true
+		r.connected = true // Simulation mode is "connected"
 		return nil
 	}
 
 	log.Printf("CAN interface %s opened at %d bps", interfaceName, bitrate)
 	r.simulated = false
+	r.connected = true
 	return nil
 }
 
 // Close closes the CAN interface
 func (r *LinuxCANReader) Close() error {
 	r.StopReading()
+	r.connected = false
 	log.Printf("Closing Linux CAN interface %s", r.interfaceName)
 	return nil
+}
+
+// IsConnected returns the current connection status
+func (r *LinuxCANReader) IsConnected() bool {
+	return r.connected
 }
 
 // Read reads a CAN frame with timeout (blocking, for backward compatibility)
@@ -125,9 +136,128 @@ func (r *LinuxCANReader) continuousRead() {
 		return
 	}
 
-	// Real hardware reading would go here
-	// For now, use simulation
-	r.continuousReadSimulated()
+	// Real hardware reading using candump
+	consecutiveErrors := 0
+	maxConsecutiveErrors := 5
+
+	// Start candump process
+	cmd := exec.Command("candump", r.interfaceName)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("Failed to create candump pipe: %v", err)
+		// Signal disconnection
+		select {
+		case r.frameChan <- nil:
+		default:
+		}
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start candump: %v", err)
+		// Signal disconnection
+		select {
+		case r.frameChan <- nil:
+		default:
+		}
+		return
+	}
+
+	// Read from candump output
+	buf := make([]byte, 1024)
+	for {
+		select {
+		case <-r.stopChan:
+			cmd.Process.Kill()
+			cmd.Wait()
+			return
+		default:
+			// Set non-blocking read with timeout
+			n, err := stdout.Read(buf)
+			if err != nil {
+				consecutiveErrors++
+				log.Printf("CAN read error: %v, consecutive errors: %d", err, consecutiveErrors)
+
+				if consecutiveErrors >= maxConsecutiveErrors {
+					log.Printf("Device %s disconnected, signaling for reconnection", r.interfaceName)
+					cmd.Process.Kill()
+					cmd.Wait()
+					// Signal disconnection
+					select {
+					case r.frameChan <- nil:
+					default:
+					}
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			// Reset error count on successful read
+			consecutiveErrors = 0
+
+			// Parse candump output and send frames
+			// Format: "can0 123#1122334455667788"
+			lines := strings.Split(string(buf[:n]), "\n")
+			for _, line := range lines {
+				frame := parseCandumpLine(line)
+				if frame != nil {
+					select {
+					case r.frameChan <- frame:
+						// Frame sent successfully
+					default:
+						log.Printf("Warning: Frame channel full, dropping frame ID: %X", frame.ID)
+					}
+				}
+			}
+		}
+	}
+}
+
+// parseCandumpLine parses a line from candump output
+func parseCandumpLine(line string) *CANFrame {
+	// Expected format: "  can0  123#1122334455667788"
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+
+	// Split by whitespace
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	// Parse ID and data (format: "ID#DATA")
+	idData := parts[len(parts)-1]
+	idDataParts := strings.Split(idData, "#")
+	if len(idDataParts) != 2 {
+		return nil
+	}
+
+	// Parse ID
+	var id uint32
+	fmt.Sscanf(idDataParts[0], "%X", &id)
+
+	// Parse data
+	dataStr := idDataParts[1]
+	data := make([]byte, 0, 8)
+	for i := 0; i < len(dataStr); i += 2 {
+		if i+1 < len(dataStr) {
+			var b byte
+			fmt.Sscanf(dataStr[i:i+2], "%02X", &b)
+			data = append(data, b)
+		}
+	}
+
+	return &CANFrame{
+		ID:        id,
+		Data:      data,
+		Length:    uint8(len(data)),
+		Timestamp: time.Now(),
+		Extended:  id > 0x7FF,
+		Remote:    false,
+	}
 }
 
 // continuousReadSimulated generates simulated frames

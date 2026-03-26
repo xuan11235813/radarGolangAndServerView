@@ -175,43 +175,108 @@ func (d *Device) deviceMainLoop() {
 	interfaceName := d.interfaceNameString
 	bitrate := 500000
 
-	// Create CAN reader based on platform
-	reader, err := NewCANReader()
-	if err != nil {
-		log.Fatalf("Failed to create CAN reader: %v", err)
-	}
+	// Create done channel for CSV writer goroutine
+	done := make(chan struct{})
 
-	// Open the CAN interface
-	err = reader.Open(interfaceName, bitrate)
-	if err != nil {
-		log.Fatalf("Failed to open CAN interface %s: %v", interfaceName, err)
-	}
-	defer reader.Close()
+	// Start CSV writer goroutine first (before CAN reader) to ensure it's ready
+	go csvWriterGoroutine(d.CSVRecordCh, d.interfaceNameString, done)
 
-	fmt.Printf("CAN interface %s opened successfully. Press Ctrl+C to exit.\n", interfaceName)
+	// Start the data processing goroutine
+	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh, d.CSVRecordCh)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start continuous reading
-	frameChan, err := reader.StartReading()
-	if err != nil {
-		log.Fatalf("Failed to start continuous reading: %v", err)
+	// Reconnection loop - keeps trying to reconnect on failure
+	for {
+		// Create CAN reader based on platform
+		reader, err := NewCANReader()
+		if err != nil {
+			log.Printf("Device %s: Failed to create CAN reader: %v. Retrying in 2 seconds...", interfaceName, err)
+			select {
+			case <-sigChan:
+				fmt.Printf("\nDevice %s: Received shutdown signal. Exiting...\n", interfaceName)
+				close(done)
+				return
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+
+		// Open the CAN interface
+		err = reader.Open(interfaceName, bitrate)
+		if err != nil {
+			log.Printf("Device %s: Failed to open CAN interface: %v. Retrying in 2 seconds...", interfaceName, err)
+			select {
+			case <-sigChan:
+				fmt.Printf("\nDevice %s: Received shutdown signal. Exiting...\n", interfaceName)
+				close(done)
+				return
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+
+		fmt.Printf("Device %s: CAN interface opened successfully.\n", interfaceName)
+
+		// Start continuous reading
+		frameChan, err := reader.StartReading()
+		if err != nil {
+			log.Printf("Device %s: Failed to start continuous reading: %v. Reconnecting...", interfaceName, err)
+			reader.Close()
+			continue
+		}
+
+		// Run read loop (returns true if should exit, false if should reconnect)
+		shouldExit := readLoopFromChannelWithReconnect(frameChan, sigChan, d.Cluster0StatusCh, d.Cluster1GeneralCh, d.interfaceNameString)
+
+		// Close the reader
+		reader.Close()
+
+		if shouldExit {
+			// User requested shutdown
+			break
+		}
+
+		// Otherwise, reconnect (USB instability recovery)
+		log.Printf("Device %s: Connection lost. Reconnecting in 1 second...", interfaceName)
+		time.Sleep(1 * time.Second)
 	}
-
-	// Create done channel for CSV writer goroutine
-	done := make(chan struct{})
-
-	// Start CSV writer goroutine
-	go csvWriterGoroutine(d.CSVRecordCh, d.interfaceNameString, done)
-
-	// Main reading loop
-	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh, d.CSVRecordCh)
-	readLoopFromChannel(frameChan, sigChan, d.Cluster0StatusCh, d.Cluster1GeneralCh, d.interfaceNameString)
 
 	// Signal CSV writer to stop
 	close(done)
+}
+
+// readLoopFromChannelWithReconnect returns true if should exit (shutdown signal), false if should reconnect
+func readLoopFromChannelWithReconnect(frameChan <-chan *CANFrame, sigChan chan os.Signal, ch0 chan Cluster0Status, ch1 chan Cluster1General, deviceName string) bool {
+	frameCount := 0
+	startTime := time.Now()
+
+	for {
+		select {
+		case <-sigChan:
+			fmt.Printf("\nDevice %s: Received shutdown signal. Exiting...\n", deviceName)
+			duration := time.Since(startTime)
+			fmt.Printf("Device %s: Processed %d frames in %v (%.2f frames/sec)\n",
+				deviceName, frameCount, duration, float64(frameCount)/duration.Seconds())
+			return true // Should exit
+		case frame, ok := <-frameChan:
+			if !ok {
+				log.Printf("Device %s: Frame channel closed, reconnecting...", deviceName)
+				return false // Should reconnect
+			}
+
+			if frame == nil {
+				// nil frame indicates USB disconnection from continuousRead
+				log.Printf("Device %s: USB disconnection detected (nil frame), reconnecting...", deviceName)
+				return false // Should reconnect immediately
+			}
+
+			frameCount++
+			ParseCANFrame(*frame, ch0, ch1, deviceName)
+		}
+	}
 }
 
 // Platform-specific implementations will be in separate files with build tags

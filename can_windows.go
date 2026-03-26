@@ -119,13 +119,19 @@ func (r *WindowsCANReader) Close() error {
 	r.StopReading()
 
 	if !r.simulated && r.cc != nil {
+		// Try to close device, but don't fail if it's already disconnected
 		r.cc.CloseDevice(r.devType, r.devIndex)
-		r.cc.Close()
+		// Note: Don't close the DLL (r.cc.Close()) as we may need to reuse it for reconnection
 	}
 
 	r.connected = false
 	log.Printf("Windows CAN interface closed")
 	return nil
+}
+
+// IsConnected returns the current connection status
+func (r *WindowsCANReader) IsConnected() bool {
+	return r.connected
 }
 
 // Read reads a CAN frame with timeout (blocking, for backward compatibility)
@@ -218,6 +224,9 @@ func (r *WindowsCANReader) continuousRead() {
 		return
 	}
 
+	consecutiveErrors := 0
+	maxConsecutiveErrors := 5
+
 	// Real hardware reading
 	for {
 		select {
@@ -231,8 +240,33 @@ func (r *WindowsCANReader) continuousRead() {
 			received := r.cc.Receive(r.devType, r.devIndex, r.canIndex, &r.receiveBuf[0], uint32(len(r.receiveBuf)), waitTime)
 			r.receiveMutex.Unlock()
 
-			if received > 0 {
-				// Process all received frames
+			// Check for USB disconnection errors
+			// Error codes: 0xFFFFFFFF (-1) or specific error codes like 433 indicate disconnection
+			if received == 0xFFFFFFFF || (received > 0x1000 && received < 0x10000) {
+				// This is an error code, not a frame count - USB likely disconnected
+				consecutiveErrors++
+				log.Printf("CAN receive error code: %d (0x%X), consecutive errors: %d", received, received, consecutiveErrors)
+
+				if consecutiveErrors >= maxConsecutiveErrors {
+					log.Printf("Device disconnected (error code %d), signaling for reconnection", received)
+					// Signal disconnection by sending nil frame
+					select {
+					case r.frameChan <- nil:
+						// Nil frame sent to signal disconnection
+					default:
+						// Channel full, close and reopen
+					}
+					return // Exit the goroutine, main loop will handle reconnection
+				}
+				time.Sleep(100 * time.Millisecond) // Wait before retry
+				continue
+			}
+
+			// Reset error count on successful receive (including timeout with 0)
+			consecutiveErrors = 0
+
+			if received > 0 && received < 0x1000 {
+				// Process all received frames (valid range)
 				for i := 0; i < int(received); i++ {
 					frame := r.receiveBuf[i].ToCANFrame()
 
