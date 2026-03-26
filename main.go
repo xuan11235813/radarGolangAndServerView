@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -84,6 +86,7 @@ type Device struct {
 	interfaceNameString string
 	Cluster0StatusCh    chan Cluster0Status
 	Cluster1GeneralCh   chan Cluster1General
+	CSVRecordCh         chan Cluster1General // Channel for CSV recording with large buffer
 }
 
 func NewDevice(deviceName string) *Device {
@@ -91,7 +94,80 @@ func NewDevice(deviceName string) *Device {
 	d.interfaceNameString = deviceName
 	d.Cluster0StatusCh = make(chan Cluster0Status, 4)
 	d.Cluster1GeneralCh = make(chan Cluster1General, 4)
+	d.CSVRecordCh = make(chan Cluster1General, 10000) // Large buffer to prevent data loss
 	return d
+}
+
+// generateCSVFilename creates a filename in format year_month_day_hour_minute_second_deviceName.csv
+func generateCSVFilename(deviceName string) string {
+	now := time.Now()
+	return fmt.Sprintf("%d_%02d_%02d_%02d_%02d_%02d_%s.csv",
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		now.Hour(),
+		now.Minute(),
+		now.Second(),
+		deviceName)
+}
+
+// csvWriterGoroutine writes Cluster1General records to CSV file
+func csvWriterGoroutine(csvCh <-chan Cluster1General, deviceName string, done <-chan struct{}) {
+	filename := generateCSVFilename(deviceName)
+
+	file, err := os.Create(filename)
+	if err != nil {
+		log.Printf("Failed to create CSV file %s: %v", filename, err)
+		return
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write CSV header
+	header := []string{"Timestamp", "ID", "DistLong", "DistLat", "VrelLong", "VrelLat", "DynProp", "RCS", "DeviceName"}
+	if err := writer.Write(header); err != nil {
+		log.Printf("Failed to write CSV header: %v", err)
+		return
+	}
+
+	recordCount := 0
+	for {
+		select {
+		case <-done:
+			log.Printf("CSV writer for device %s stopping. Wrote %d records to %s", deviceName, recordCount, filename)
+			return
+		case record, ok := <-csvCh:
+			if !ok {
+				log.Printf("CSV channel closed for device %s. Wrote %d records to %s", deviceName, recordCount, filename)
+				return
+			}
+
+			row := []string{
+				strconv.FormatInt(record.Timestamp, 10),
+				strconv.Itoa(int(record.ID)),
+				strconv.FormatFloat(record.DistLong, 'f', 4, 64),
+				strconv.FormatFloat(record.DistLat, 'f', 4, 64),
+				strconv.FormatFloat(record.VrelLong, 'f', 4, 64),
+				strconv.FormatFloat(record.VrelLat, 'f', 4, 64),
+				strconv.Itoa(int(record.DynProp)),
+				strconv.FormatFloat(record.RCS, 'f', 4, 64),
+				record.DeviceName,
+			}
+
+			if err := writer.Write(row); err != nil {
+				log.Printf("Failed to write CSV record: %v", err)
+			} else {
+				recordCount++
+			}
+
+			// Flush periodically to ensure data is written
+			if recordCount%100 == 0 {
+				writer.Flush()
+			}
+		}
+	}
 }
 
 func (d *Device) deviceMainLoop() {
@@ -112,7 +188,7 @@ func (d *Device) deviceMainLoop() {
 	}
 	defer reader.Close()
 
-	fmt.Println("CAN interface opened successfully. Press Ctrl+C to exit.")
+	fmt.Printf("CAN interface %s opened successfully. Press Ctrl+C to exit.\n", interfaceName)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -124,9 +200,18 @@ func (d *Device) deviceMainLoop() {
 		log.Fatalf("Failed to start continuous reading: %v", err)
 	}
 
+	// Create done channel for CSV writer goroutine
+	done := make(chan struct{})
+
+	// Start CSV writer goroutine
+	go csvWriterGoroutine(d.CSVRecordCh, d.interfaceNameString, done)
+
 	// Main reading loop
-	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh)
+	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh, d.CSVRecordCh)
 	readLoopFromChannel(frameChan, sigChan, d.Cluster0StatusCh, d.Cluster1GeneralCh, d.interfaceNameString)
+
+	// Signal CSV writer to stop
+	close(done)
 }
 
 // Platform-specific implementations will be in separate files with build tags
@@ -351,7 +436,7 @@ func extractBitsMotorola(data []byte, startBit, length int) uint64 {
 	return result
 }
 
-func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General) {
+func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General, csvCh chan Cluster1General) {
 	// Print header once at the beginning
 	printClusterHeader()
 
@@ -363,6 +448,14 @@ func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General) {
 		case msg := <-ch1:
 			// Use the compact format for real-time updates
 			printCluster1GeneralLine(msg)
+			// Send to CSV recording channel (non-blocking to prevent any slowdown)
+			select {
+			case csvCh <- msg:
+				// Successfully sent to CSV channel
+			default:
+				// Channel full, log warning but don't block
+				log.Printf("Warning: CSV recording channel full for device, dropping record")
+			}
 		}
 	}
 }
