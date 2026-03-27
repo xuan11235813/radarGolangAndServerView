@@ -124,8 +124,8 @@
             border: 1px solid #0f3460;
             display: flex;
             flex-direction: column;
-            flex: 1;
-            min-width: 600px;
+            flex: 0 0 auto;
+            width: calc((100vh - 180px) * 0.5 + 70px);
             max-width: calc(100% - 20px);
             height: calc(100vh - 120px);
         }
@@ -354,16 +354,101 @@
             drawBackground(ctx, canvas.width, canvas.height);
         }
 
+        // Drag state
+        let isDragging = false;
+        let dragStartX = 0;
+        let dragStartY = 0;
+        let dragStartLongMin = 0;
+        let dragStartLongMax = 0;
+        let dragStartLatMin = 0;
+        let dragStartLatMax = 0;
+
         function initCanvas(deviceName) {
             const canvas = document.getElementById(`canvas-${deviceName}`);
 
             // Add wheel event listener for zoom
             canvas.addEventListener('wheel', (event) => handleWheel(event, deviceName), { passive: false });
 
+            // Add mouse event listeners for panning
+            canvas.addEventListener('mousedown', handleMouseDown);
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseup', handleMouseUp);
+            canvas.addEventListener('mouseleave', handleMouseUp);
+
             // Use requestAnimationFrame to ensure container is rendered
             requestAnimationFrame(() => {
                 resizeCanvas(deviceName);
             });
+        }
+
+        function handleMouseDown(event) {
+            if (event.button === 0) { // Left click
+                isDragging = true;
+                dragStartX = event.clientX;
+                dragStartY = event.clientY;
+                dragStartLongMin = longitudeMin;
+                dragStartLongMax = longitudeMax;
+                dragStartLatMin = latitudeMin;
+                dragStartLatMax = latitudeMax;
+                event.target.style.cursor = 'grabbing';
+            }
+        }
+
+        function handleMouseMove(event) {
+            if (!isDragging) return;
+
+            const canvas = event.target;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            // Calculate margins
+            const marginLeft = 50;
+            const marginBottom = 40;
+            const marginTop = 20;
+            const marginRight = 20;
+
+            const plotWidth = canvas.width - marginLeft - marginRight;
+            const plotHeight = canvas.height - marginTop - marginBottom;
+
+            const longRange = dragStartLongMax - dragStartLongMin;
+            const latRange = dragStartLatMax - dragStartLatMin;
+
+            const scaleX = plotWidth / latRange;
+            const scaleY = plotHeight / longRange;
+            const scale = Math.min(scaleX, scaleY);
+
+            const actualPlotWidth = latRange * scale;
+            const actualPlotHeight = longRange * scale;
+
+            const offsetX = marginLeft + (plotWidth - actualPlotWidth) / 2;
+            const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
+
+            // Calculate pixel delta
+            const deltaX = event.clientX - dragStartX;
+            const deltaY = event.clientY - dragStartY;
+
+            // Convert to data coordinates (inverted for Y)
+            const dataDeltaX = -deltaX / scale;
+            const dataDeltaY = deltaY / scale;
+
+            // Apply pan
+            longitudeMin = dragStartLongMin + dataDeltaY;
+            longitudeMax = dragStartLongMax + dataDeltaY;
+            latitudeMin = dragStartLatMin + dataDeltaX;
+            latitudeMax = dragStartLatMax + dataDeltaX;
+
+            // Redraw all devices
+            redrawAllDevices();
+        }
+
+        function handleMouseUp(event) {
+            if (isDragging) {
+                isDragging = false;
+                if (event.target) {
+                    event.target.style.cursor = 'default';
+                }
+            }
         }
 
         function drawBackground(ctx, width, height) {
