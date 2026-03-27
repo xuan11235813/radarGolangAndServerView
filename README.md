@@ -1,64 +1,116 @@
-# Cross-Platform CAN Bus Reader
+# CAN Bus Multi-Device 2D Point Viewer
 
-A Go application for reading CAN bus data from USB devices on both Linux and Windows platforms.
+A real-time CAN bus data visualization system with WebSocket server and web-based 2D point display for multiple devices.
 
 ## Features
 
-- **Cross-platform support**: Works on Linux (SocketCAN) and Windows (ControlCAN.dll)
-- **Real-time CAN frame reading**: Reads CAN frames with configurable timeout
-- **CAN frame writing**: Can send CAN frames back to the bus
-- **Filter support**: Configurable acceptance filters
-- **Simulation mode**: Works without physical hardware for testing
-- **Command-line interface**: Easy to use with command-line options
-- **Automatic fallback**: Falls back to simulation if hardware/DLL not available
+- **Multi-device support**: Monitor multiple CAN interfaces simultaneously
+- **Real-time WebSocket server**: Broadcasts 2D point data to web clients on port 1999
+- **Interactive web interface**: 
+  - Pan (left-click drag) and zoom (mouse wheel) functionality
+  - Adaptive grid and axis labels based on zoom level
+  - Equal scale for both axes (1 meter = same pixel length)
+- **CSV data logging**: Automatically records cluster data with timestamps
+- **Cross-platform**: Works on Linux (SocketCAN) and Windows (ControlCAN.dll)
+
+## Architecture
+
+```
+CAN Bus → Go Application → WebSocket Server → Web Browser
+                ↓
+           CSV Logging
+```
 
 ## Installation
 
 ### Prerequisites
 
 - Go 1.21 or later
-- On Linux: SocketCAN support and `ip` command (usually available)
+- On Linux: SocketCAN support
 - On Windows: ControlCAN.dll (provided with CAN hardware drivers)
 
 ### Build
 
 ```bash
 # Build for current platform
-go build -o canbus-reader
+go build -o canbus-multidevice.exe
 
 # Build for Linux
-GOOS=linux GOARCH=amd64 go build -o canbus-reader-linux
+GOOS=linux GOARCH=amd64 go build -o canbus-multidevice
 
 # Build for Windows
-GOOS=windows GOARCH=amd64 go build -o canbus-reader-windows.exe
+GOOS=windows GOARCH=amd64 go build -o canbus-multidevice.exe
+```
+
+## Configuration
+
+Edit `config.json` to specify which CAN devices to monitor:
+
+```json
+{
+    "devices": [
+        "can0",
+        "can1"
+    ]
+}
 ```
 
 ## Usage
 
-```bash
-# Basic usage (defaults to can0 interface, 500kbps)
-./canbus-reader
+1. **Start the application**:
+   ```bash
+   ./canbus-multidevice.exe
+   ```
 
-# Specify interface and bitrate
-./canbus-reader -interface can0 -bitrate 500000
+2. **Open web browser**: Navigate to `http://localhost:1999`
 
-# Show help
-./canbus-reader -help
+3. **Interact with the visualization**:
+   - **Zoom**: Mouse wheel up/down to zoom in/out (centered on cursor)
+   - **Pan**: Left-click and drag to move the view
+   - **Toggle Grid**: Show/hide grid lines
+   - **Toggle Axes**: Show/hide axis labels
+   - **Clear Points**: Remove all displayed points
+   - **Reset Zoom**: Reset to default view (Longitude: 0-200m, Latitude: -50 to 50m)
+   - **Reset All**: Reset everything to initial state
+   - **Reconnect All**: Re-establish WebSocket connections
+
+## Coordinate System
+
+- **Longitude (distLong)**: Vertical axis, 0m at bottom to 200m at top
+- **Latitude (distLat)**: Horizontal axis, -50m at left to 50m at right
+- **Equal scale**: 1 meter has the same pixel length in both directions
+
+## Data Format
+
+### WebSocket Message Format
+
+Each device broadcasts JSON arrays of 2D points:
+
+```json
+[
+    {"distLong": 50.5, "distLat": -10.2},
+    {"distLong": 75.3, "distLat": 15.8}
+]
 ```
 
-### Command-line Options
+### CSV Log Format
 
-- `-interface`: CAN interface name (default: "can0")
-  - On Linux: "can0", "can1", "vcan0"
-  - On Windows: "0" (device index 0, CAN channel 0), "USBCAN2_0_0"
-- `-bitrate`: CAN bus bitrate in bps (default: 500000)
-- `-help`: Show help message
+Files are named: `YYYY_MM_DD_HH_MM_SS_deviceName.csv`
+
+Columns:
+- Timestamp (milliseconds UTC)
+- ID (cluster ID)
+- DistLong (longitude distance in meters)
+- DistLat (latitude distance in meters)
+- VrelLong (relative longitudinal velocity)
+- VrelLat (relative lateral velocity)
+- DynProp (dynamic property)
+- RCS (radar cross section)
+- DeviceName
 
 ## Platform-Specific Details
 
 ### Linux (SocketCAN)
-
-The Linux implementation uses SocketCAN subsystem. For real hardware:
 
 1. Load CAN kernel modules:
    ```bash
@@ -74,106 +126,49 @@ The Linux implementation uses SocketCAN subsystem. For real hardware:
 
 3. Run the application:
    ```bash
-   sudo ./canbus-reader -interface can0
+   sudo ./canbus-multidevice
    ```
-
-Common interface names: `can0`, `can1`, `vcan0` (virtual)
 
 ### Windows (ControlCAN.dll)
 
-The Windows implementation uses ControlCAN.dll (commonly provided with ZLG/USBCAN devices). For real hardware:
-
-1. Install device drivers (usually includes ControlCAN.dll)
-2. Place ControlCAN.dll in the same directory as the executable or in system PATH
+1. Install device drivers (includes ControlCAN.dll)
+2. Place ControlCAN.dll in the same directory as the executable
 3. Connect CAN-USB device
 4. Run the application:
    ```cmd
-   canbus-reader.exe -interface 0
+   canbus-multidevice.exe
    ```
 
-**Interface naming on Windows:**
-- Simple number: `0` = device index 0, CAN channel 0
-- Extended format: `USBCAN2_0_0` = USBCAN2 device, index 0, CAN channel 0
+## Files
 
-**Note on DLL architecture:** The application is built for 64-bit Windows. If you have a 32-bit ControlCAN.dll, you may need to:
-1. Use 32-bit Go (GOARCH=386) to build a 32-bit executable
-2. Or obtain a 64-bit version of ControlCAN.dll from your device manufacturer
+- `main.go` - Main application with CAN reading and WebSocket server
+- `index.html` - Web interface for 2D point visualization
+- `config.json` - Device configuration
+- `can_linux.go` - Linux SocketCAN implementation
+- `can_windows.go` - Windows ControlCAN implementation
+- `can_stub.go` - Simulation mode for testing without hardware
+- `print_cluster.go` - Cluster data formatting utilities
 
-### Simulation Mode
+## WebSocket Endpoints
 
-If no CAN hardware is detected or ControlCAN.dll cannot be loaded, the application automatically falls back to simulation mode and generates test CAN frames. This is useful for testing without physical hardware.
+- `ws://hostname:1999/{deviceName}` - WebSocket endpoint for each device
+- `http://hostname:1999/` - Web interface (serves index.html)
+- `http://hostname:1999/config.json` - Configuration file
 
-## CAN Frame Format
+## Adaptive Grid System
 
-The application displays CAN frames in the format:
-```
-[frame#] TYPE ID: XXX DLC: N Data: XX XX XX ...
-```
+The grid and axis labels automatically adjust based on zoom level:
 
-Where:
-- `frame#`: Sequential frame number
-- `TYPE`: `DATA` for data frames, `RTR` for remote frames
-- `ID`: CAN identifier (3 hex digits for standard, 8 for extended)
-- `DLC`: Data Length Code (0-8)
-- `Data`: Payload data in hex
-
-## Architecture
-
-The application uses Go's build tags for platform-specific implementations:
-
-- `can_linux.go`: Linux SocketCAN implementation (build tag: `linux`)
-- `can_windows.go`: Windows ControlCAN.dll implementation (build tag: `windows`)
-- `controlcan_windows.go`: ControlCAN.dll wrapper with Go bindings
-- `can_stub.go`: Stub implementation for other platforms with simulation capability
-
-The main interface `CANReader` defines methods for opening/closing interfaces, reading/writing frames, and setting filters.
-
-## ControlCAN.dll Integration
-
-The Windows implementation includes a complete Go wrapper for ControlCAN.dll that mirrors the C++ API shown in the provided code. Key features:
-
-1. **Direct DLL binding**: Uses `syscall` package to load and call ControlCAN.dll functions
-2. **Structure mapping**: Go structs match `VCI_INIT_CONFIG`, `VCI_CAN_OBJ` from the DLL
-3. **Automatic conversion**: Converts between Go `CANFrame` and `VCI_CAN_OBJ` structures
-4. **Error handling**: Graceful fallback to simulation if DLL loading fails
-
-### DLL Loading Issues
-
-If you encounter "not a valid Win32 application" error:
-1. Check if ControlCAN.dll is 32-bit or 64-bit
-2. Ensure Go build architecture matches DLL architecture
-3. Try building with `GOARCH=386` for 32-bit DLLs:
-   ```bash
-   GOOS=windows GOARCH=386 go build -o canbus-reader-32bit.exe
-   ```
-
-## Testing
-
-Run basic tests:
-
-```bash
-# Test compilation
-go build ./...
-
-# Run in simulation mode (no hardware needed)
-go run .
-
-# Test Windows implementation (with simulation fallback)
-go run . -interface 0 -bitrate 500000
-```
-
-## Extending for Other Platforms
-
-To add support for another platform:
-
-1. Create a new file with appropriate build tag (e.g., `//go:build darwin`)
-2. Implement the `CANReader` interface
-3. Update `newPlatformCANReader()` to return your implementation
+| Zoom Level | Grid Step | Label Step |
+|------------|-----------|------------|
+| Very zoomed in | 1m | 2m |
+| Zoomed in | 2m | 5m |
+| Normal | 5m | 10m |
+| Zoomed out | 10m | 20m |
+| Far zoomed out | 20m | 50m |
+| Very far zoomed out | 50m | 100m |
+| Default view | 100m | 200m |
 
 ## License
 
-MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT License
