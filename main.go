@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 // CANFrame represents a CAN bus data frame
@@ -42,16 +45,31 @@ type Cluster1General struct {
 	DeviceName string
 }
 
-type RecordClustering struct {
-	ID         uint8
-	DistLong   float64
-	DistLat    float64
-	VrelLong   float64
-	VrelLat    float64
-	DynProp    uint8
-	RCS        float64
-	Timestamp  uint64
-	DeviceName string
+type DataFrame struct {
+	InterfaceName string
+	FrameData     []Cluster1General
+}
+
+// Point2D represents a 2D point for websocket transmission
+type Point2D struct {
+	DistLong float64 `json:"distLong"`
+	DistLat  float64 `json:"distLat"`
+}
+
+// WebSocketClient represents a connected websocket client
+type WebSocketClient struct {
+	InterfaceName string
+	Conn          *websocket.Conn
+	SendChan      chan []Point2D
+}
+
+// WebSocketServer represents a websocket server for a device
+type WebSocketServer struct {
+	InterfaceName string
+	Port          int
+	Clients       map[*websocket.Conn]bool
+	ClientMutex   sync.RWMutex
+	BroadcastChan chan []Point2D
 }
 
 // GetCurrentTimestampMillis returns the current UTC timestamp in milliseconds
@@ -170,6 +188,138 @@ func csvWriterGoroutine(csvCh <-chan Cluster1General, deviceName string, done <-
 	}
 }
 
+var serverFrameChan chan DataFrame
+
+// clusteringServer manages websocket servers for all devices on a single port
+func clusteringServer(config *Config, done <-chan struct{}) {
+	// Map of interface name to websocket server
+	wsServers := make(map[string]*WebSocketServer)
+
+	// Create a websocket server for each device (all on port 1999)
+	for _, deviceName := range config.Devices {
+		wsServer := &WebSocketServer{
+			InterfaceName: deviceName,
+			Port:          1999, // Same port for all devices
+			Clients:       make(map[*websocket.Conn]bool),
+			BroadcastChan: make(chan []Point2D, 100),
+		}
+		wsServers[deviceName] = wsServer
+
+		// Setup HTTP route for this device
+		setupWebSocketRoute(wsServer)
+
+		log.Printf("WebSocket route registered for device %s at /%s on port 1999", deviceName, deviceName)
+	}
+
+	// Start broadcast goroutines for each device
+	for _, wsServer := range wsServers {
+		go func(server *WebSocketServer) {
+			for points := range server.BroadcastChan {
+				server.ClientMutex.RLock()
+				for conn := range server.Clients {
+					// Send points as JSON
+					err := websocket.JSON.Send(conn, points)
+					if err != nil {
+						log.Printf("Error sending to websocket client: %v", err)
+						conn.Close()
+						server.ClientMutex.RUnlock()
+						server.ClientMutex.Lock()
+						delete(server.Clients, conn)
+						server.ClientMutex.Unlock()
+						server.ClientMutex.RLock()
+					}
+				}
+				server.ClientMutex.RUnlock()
+			}
+		}(wsServer)
+	}
+
+	// Serve static files for the web interface
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Serve index.html for root path
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, "index.html")
+			return
+		}
+		// Serve other files from current directory
+		http.ServeFile(w, r, r.URL.Path[1:])
+	})
+
+	// Start HTTP server on port 1999 in a goroutine
+	go func() {
+		addr := ":1999"
+		log.Printf("Starting HTTP server on %s for all devices", addr)
+		log.Printf("Web interface available at http://localhost%s", addr)
+		err := http.ListenAndServe(addr, nil)
+		if err != nil {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+
+	// Main loop: read from serverFrameChan and broadcast to appropriate websocket
+	for {
+		select {
+		case <-done:
+			log.Println("Clustering server shutting down...")
+			return
+		case frame := <-serverFrameChan:
+			// Find the websocket server for this interface
+			wsServer, ok := wsServers[frame.InterfaceName]
+			if !ok {
+				log.Printf("No websocket server found for interface %s", frame.InterfaceName)
+				continue
+			}
+
+			// Convert Cluster1General data to Point2D slice
+			points := make([]Point2D, 0, len(frame.FrameData))
+			for _, cluster := range frame.FrameData {
+				points = append(points, Point2D{
+					DistLong: cluster.DistLong,
+					DistLat:  cluster.DistLat,
+				})
+			}
+
+			// Send to broadcast channel (non-blocking)
+			select {
+			case wsServer.BroadcastChan <- points:
+				// Successfully queued for broadcast
+			default:
+				log.Printf("Warning: Broadcast channel full for device %s", frame.InterfaceName)
+			}
+		}
+	}
+}
+
+// setupWebSocketRoute sets up a websocket route for a device
+func setupWebSocketRoute(wsServer *WebSocketServer) {
+	// WebSocket handler
+	handler := websocket.Handler(func(conn *websocket.Conn) {
+		// Register client
+		wsServer.ClientMutex.Lock()
+		wsServer.Clients[conn] = true
+		wsServer.ClientMutex.Unlock()
+
+		log.Printf("Client connected to websocket for device %s", wsServer.InterfaceName)
+
+		// Keep connection alive (read loop to detect disconnect)
+		for {
+			var msg string
+			err := websocket.Message.Receive(conn, &msg)
+			if err != nil {
+				// Client disconnected
+				wsServer.ClientMutex.Lock()
+				delete(wsServer.Clients, conn)
+				wsServer.ClientMutex.Unlock()
+				log.Printf("Client disconnected from websocket for device %s", wsServer.InterfaceName)
+				return
+			}
+		}
+	})
+
+	// Setup HTTP route with interface name as path
+	http.Handle(fmt.Sprintf("/%s", wsServer.InterfaceName), handler)
+}
+
 func (d *Device) deviceMainLoop() {
 	// Parse command line arguments
 	interfaceName := d.interfaceNameString
@@ -182,7 +332,7 @@ func (d *Device) deviceMainLoop() {
 	go csvWriterGoroutine(d.CSVRecordCh, d.interfaceNameString, done)
 
 	// Start the data processing goroutine
-	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh, d.CSVRecordCh)
+	go implementFrameData(d.Cluster0StatusCh, d.Cluster1GeneralCh, d.CSVRecordCh, interfaceName)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -280,9 +430,10 @@ func readLoopFromChannelWithReconnect(frameChan <-chan *CANFrame, sigChan chan o
 }
 
 // Platform-specific implementations will be in separate files with build tags
+var currentTime int64 = GetCurrentTimestampMillis()
 
 func ParseCANFrame(frame CANFrame, ch0 chan Cluster0Status, ch1 chan Cluster1General, deviceName string) {
-	var currentTime int64 = GetCurrentTimestampMillis()
+
 	switch frame.ID {
 
 	// =========================
@@ -408,9 +559,18 @@ func main() {
 
 	fmt.Printf("Loaded %d devices from config.json: %v\n", len(config.Devices), config.Devices)
 
+	// Initialize the global serverFrameChan
+	serverFrameChan = make(chan DataFrame, 100)
+
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Create done channel for graceful shutdown
+	done := make(chan struct{})
+
+	// Start the clustering server goroutine
+	go clusteringServer(config, done)
 
 	// Use WaitGroup to wait for all devices to finish
 	var wg sync.WaitGroup
@@ -428,6 +588,9 @@ func main() {
 	// Wait for shutdown signal
 	<-sigChan
 	fmt.Printf("\nReceived shutdown signal. Exiting...\n")
+
+	// Signal all goroutines to stop
+	close(done)
 
 	// Wait for all device goroutines to finish
 	wg.Wait()
@@ -501,16 +664,22 @@ func extractBitsMotorola(data []byte, startBit, length int) uint64 {
 	return result
 }
 
-func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General, csvCh chan Cluster1General) {
+func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General, csvCh chan Cluster1General, interfaceName string) {
 	// Print header once at the beginning
 	printClusterHeader()
-
+	var dataVec []Cluster1General
 	for {
 		select {
 		case msg := <-ch0:
 			fmt.Printf("[0x600] %+v\n", msg)
-
+			var frameItem DataFrame
+			frameItem.InterfaceName = interfaceName
+			frameItem.FrameData = make([]Cluster1General, len(dataVec))
+			copy(frameItem.FrameData, dataVec)
+			serverFrameChan <- frameItem
+			dataVec = nil
 		case msg := <-ch1:
+			dataVec = append(dataVec, msg)
 			// Use the compact format for real-time updates
 			printCluster1GeneralLine(msg)
 			// Send to CSV recording channel (non-blocking to prevent any slowdown)

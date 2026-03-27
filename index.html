@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAN Bus 2D Point Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a2e;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background-color: #16213e;
+            padding: 10px 20px;
+            text-align: center;
+            border-bottom: 2px solid #0f3460;
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            color: #e94560;
+            font-size: 1.4rem;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 5px;
+            font-size: 0.85rem;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #666;
+        }
+
+        .status-dot.connected {
+            background-color: #4ade80;
+            box-shadow: 0 0 10px #4ade80;
+        }
+
+        .status-dot.disconnected {
+            background-color: #ef4444;
+            box-shadow: 0 0 10px #ef4444;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            padding: 8px;
+            background-color: #16213e;
+            flex-shrink: 0;
+        }
+
+        .control-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .control-btn.primary {
+            background-color: #e94560;
+            color: white;
+        }
+
+        .control-btn.primary:hover {
+            background-color: #ff6b8a;
+        }
+
+        .control-btn.secondary {
+            background-color: #0f3460;
+            color: #eee;
+        }
+
+        .control-btn.secondary:hover {
+            background-color: #1a4a7a;
+        }
+
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-content: flex-start;
+            gap: 10px;
+            padding: 10px;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .device-column {
+            background-color: #16213e;
+            border-radius: 8px;
+            padding: 8px;
+            border: 1px solid #0f3460;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-width: 600px;
+            max-width: calc(100% - 20px);
+            height: calc(100vh - 120px);
+        }
+
+        .device-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+
+        .device-name {
+            font-size: 1rem;
+            font-weight: bold;
+            color: #e94560;
+        }
+
+        .device-status {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background-color: #333;
+        }
+
+        .device-status.connected {
+            background-color: #166534;
+            color: #4ade80;
+        }
+
+        .device-status.disconnected {
+            background-color: #7f1d1d;
+            color: #fca5a5;
+        }
+
+        .canvas-container {
+            position: relative;
+            background-color: #0f0f23;
+            border-radius: 6px;
+            overflow: hidden;
+            flex: 1;
+            min-height: 500px;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .point-info {
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: #aaa;
+            flex-shrink: 0;
+        }
+
+        .point-count {
+            color: #4ade80;
+            font-weight: bold;
+        }
+
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            font-size: 1.2rem;
+            color: #666;
+        }
+
+        .error-message {
+            background-color: #7f1d1d;
+            color: #fca5a5;
+            padding: 20px;
+            text-align: center;
+            border-radius: 8px;
+            margin: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>CAN Bus 2D Point Viewer</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <span>Server:</span>
+                <span id="server-status-dot" class="status-dot"></span>
+                <span id="server-status-text">Connecting...</span>
+            </div>
+            <div class="status-item">
+                <span>Devices:</span>
+                <span id="device-count">0</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="control-btn secondary" onclick="toggleGrid()">Toggle Grid</button>
+        <button class="control-btn secondary" onclick="toggleAxes()">Toggle Axes</button>
+        <button class="control-btn secondary" onclick="clearAllPoints()">Clear Points</button>
+        <button class="control-btn secondary" onclick="resetZoom()">Reset Zoom</button>
+        <button class="control-btn primary" onclick="resetAll()">Reset All</button>
+        <button class="control-btn primary" onclick="reconnectAll()">Reconnect All</button>
+    </div>
+
+    <div id="container" class="container">
+        <div class="loading">Loading configuration...</div>
+    </div>
+
+    <script>
+        // Configuration
+        const WS_PORT = 1999;
+        const WS_HOST = window.location.hostname || 'localhost';
+        const CONFIG_URL = 'config.json';
+
+        // State
+        let devices = [];
+        let deviceConnections = {};
+        let showGrid = true;
+        let showAxes = true;
+
+        // Default axis ranges
+        const DEFAULT_LONGITUDE_MIN = 0;
+        const DEFAULT_LONGITUDE_MAX = 200;
+        const DEFAULT_LATITUDE_MIN = -50;
+        const DEFAULT_LATITUDE_MAX = 50;
+
+        // Current axis ranges (can be modified by zoom)
+        let longitudeMin = DEFAULT_LONGITUDE_MIN;
+        let longitudeMax = DEFAULT_LONGITUDE_MAX;
+        let latitudeMin = DEFAULT_LATITUDE_MIN;
+        let latitudeMax = DEFAULT_LATITUDE_MAX;
+
+        // Store last points for each device (for redrawing on zoom)
+        let devicePoints = {};
+
+        // Colors
+        const COLORS = {
+            background: '#0f0f23',
+            grid: '#1a1a3e',
+            axes: '#3a3a5e',
+            point: '#e94560',
+            pointGlow: 'rgba(233, 69, 96, 0.3)',
+            text: '#aaa'
+        };
+
+        // Fetch configuration
+        async function loadConfig() {
+            try {
+                const response = await fetch(CONFIG_URL);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const config = await response.json();
+                devices = config.devices || [];
+
+                if (devices.length === 0) {
+                    showError('No devices found in configuration');
+                    return;
+                }
+
+                document.getElementById('device-count').textContent = devices.length;
+                createDeviceColumns();
+                connectAllDevices();
+            } catch (error) {
+                showError(`Failed to load configuration: ${error.message}`);
+            }
+        }
+
+        function showError(message) {
+            const container = document.getElementById('container');
+            container.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
+        function createDeviceColumns() {
+            const container = document.getElementById('container');
+            container.innerHTML = '';
+
+            devices.forEach(deviceName => {
+                const column = document.createElement('div');
+                column.className = 'device-column';
+                column.id = `device-${deviceName}`;
+                column.innerHTML = `
+                    <div class="device-header">
+                        <span class="device-name">${deviceName}</span>
+                        <span class="device-status disconnected" id="status-${deviceName}">Disconnected</span>
+                    </div>
+                    <div class="canvas-container">
+                        <canvas id="canvas-${deviceName}"></canvas>
+                    </div>
+                    <div class="point-info">
+                        Points: <span class="point-count" id="count-${deviceName}">0</span>
+                        <span id="last-update-${deviceName}"></span>
+                    </div>
+                `;
+                container.appendChild(column);
+
+                // Initialize canvas
+                initCanvas(deviceName);
+            });
+
+            // Handle window resize
+            window.addEventListener('resize', handleResize);
+        }
+
+        function handleResize() {
+            devices.forEach(deviceName => {
+                resizeCanvas(deviceName);
+            });
+        }
+
+        function resizeCanvas(deviceName) {
+            const canvas = document.getElementById(`canvas-${deviceName}`);
+            const container = canvas.parentElement;
+
+            // Set canvas size to match container
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+
+            // Redraw
+            const ctx = canvas.getContext('2d');
+            drawBackground(ctx, canvas.width, canvas.height);
+        }
+
+        function initCanvas(deviceName) {
+            const canvas = document.getElementById(`canvas-${deviceName}`);
+
+            // Add wheel event listener for zoom
+            canvas.addEventListener('wheel', (event) => handleWheel(event, deviceName), { passive: false });
+
+            // Use requestAnimationFrame to ensure container is rendered
+            requestAnimationFrame(() => {
+                resizeCanvas(deviceName);
+            });
+        }
+
+        function drawBackground(ctx, width, height) {
+            // Clear canvas
+            ctx.fillStyle = COLORS.background;
+            ctx.fillRect(0, 0, width, height);
+
+            // Calculate margins for labels
+            const marginLeft = 50;
+            const marginBottom = 40;
+            const marginTop = 20;
+            const marginRight = 20;
+
+            const plotWidth = width - marginLeft - marginRight;
+            const plotHeight = height - marginTop - marginBottom;
+
+            // Calculate scale to ensure equal unit length for both axes (using current zoom)
+            const longRange = longitudeMax - longitudeMin;
+            const latRange = latitudeMax - latitudeMin;
+
+            // Calculate pixels per meter for each axis
+            const scaleX = plotWidth / latRange;
+            const scaleY = plotHeight / longRange;
+
+            // Use the smaller scale to fit both axes with equal unit length
+            const scale = Math.min(scaleX, scaleY);
+
+            // Calculate actual plot dimensions with equal scale
+            const actualPlotWidth = latRange * scale;
+            const actualPlotHeight = longRange * scale;
+
+            // Center the plot in the available space
+            const offsetX = marginLeft + (plotWidth - actualPlotWidth) / 2;
+            const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
+
+            // Draw grid
+            if (showGrid) {
+                ctx.strokeStyle = COLORS.grid;
+                ctx.lineWidth = 1;
+
+                // Calculate adaptive grid step based on zoom level
+                const gridStep = calculateGridStep(scale);
+
+                // Vertical grid lines (latitude)
+                const latStart = Math.ceil(latitudeMin / gridStep) * gridStep;
+                for (let lat = latStart; lat <= latitudeMax; lat += gridStep) {
+                    const x = offsetX + (lat - latitudeMin) * scale;
+                    ctx.beginPath();
+                    ctx.moveTo(x, offsetY);
+                    ctx.lineTo(x, offsetY + actualPlotHeight);
+                    ctx.stroke();
+                }
+
+                // Horizontal grid lines (longitude)
+                const longStart = Math.ceil(longitudeMin / gridStep) * gridStep;
+                for (let long = longStart; long <= longitudeMax; long += gridStep) {
+                    const y = offsetY + actualPlotHeight - (long - longitudeMin) * scale;
+                    ctx.beginPath();
+                    ctx.moveTo(offsetX, y);
+                    ctx.lineTo(offsetX + actualPlotWidth, y);
+                    ctx.stroke();
+                }
+            }
+
+            // Draw axes
+            if (showAxes) {
+                ctx.strokeStyle = COLORS.axes;
+                ctx.lineWidth = 2;
+
+                // X-axis (bottom of plot)
+                ctx.beginPath();
+                ctx.moveTo(offsetX, offsetY + actualPlotHeight);
+                ctx.lineTo(offsetX + actualPlotWidth, offsetY + actualPlotHeight);
+                ctx.stroke();
+
+                // Y-axis (left of plot)
+                ctx.beginPath();
+                ctx.moveTo(offsetX, offsetY);
+                ctx.lineTo(offsetX, offsetY + actualPlotHeight);
+                ctx.stroke();
+
+                // Draw scale labels
+                ctx.fillStyle = COLORS.text;
+                ctx.font = '11px Arial';
+
+                // Calculate adaptive label step
+                const labelStep = calculateLabelStep(scale);
+
+                // X-axis labels (Latitude)
+                ctx.textAlign = 'center';
+                const latLabelStart = Math.ceil(latitudeMin / labelStep) * labelStep;
+                for (let lat = latLabelStart; lat <= latitudeMax; lat += labelStep) {
+                    const x = offsetX + (lat - latitudeMin) * scale;
+                    ctx.fillText(`${lat.toFixed(0)}m`, x, offsetY + actualPlotHeight + 15);
+                }
+                ctx.fillText('Latitude', offsetX + actualPlotWidth / 2, height - 5);
+
+                // Y-axis labels (Longitude)
+                ctx.textAlign = 'right';
+                const longLabelStart = Math.ceil(longitudeMin / labelStep) * labelStep;
+                for (let long = longLabelStart; long <= longitudeMax; long += labelStep) {
+                    const y = offsetY + actualPlotHeight - (long - longitudeMin) * scale;
+                    ctx.fillText(`${long.toFixed(0)}m`, offsetX - 5, y + 4);
+                }
+
+                // Y-axis title
+                ctx.save();
+                ctx.translate(12, offsetY + actualPlotHeight / 2);
+                ctx.rotate(-Math.PI / 2);
+                ctx.textAlign = 'center';
+                ctx.fillText('Longitude', 0, 0);
+                ctx.restore();
+            }
+        }
+
+        // Calculate grid step based on zoom scale
+        function calculateGridStep(scale) {
+            const pixelsPer10m = 10 * scale;
+            if (pixelsPer10m >= 50) return 10;
+            if (pixelsPer10m >= 25) return 20;
+            if (pixelsPer10m >= 10) return 50;
+            return 100;
+        }
+
+        // Calculate label step based on zoom scale
+        function calculateLabelStep(scale) {
+            const pixelsPer25m = 25 * scale;
+            if (pixelsPer25m >= 80) return 25;
+            if (pixelsPer25m >= 40) return 50;
+            if (pixelsPer25m >= 20) return 100;
+            return 200;
+        }
+
+        function drawPoints(deviceName, points) {
+            // Store points for this device (for redrawing on zoom)
+            devicePoints[deviceName] = points;
+
+            const canvas = document.getElementById(`canvas-${deviceName}`);
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Calculate margins (same as drawBackground)
+            const marginLeft = 50;
+            const marginBottom = 40;
+            const marginTop = 20;
+            const marginRight = 20;
+
+            const plotWidth = width - marginLeft - marginRight;
+            const plotHeight = height - marginTop - marginBottom;
+
+            // Calculate scale to ensure equal unit length for both axes (using current zoom)
+            const longRange = longitudeMax - longitudeMin;
+            const latRange = latitudeMax - latitudeMin;
+
+            const scaleX = plotWidth / latRange;
+            const scaleY = plotHeight / longRange;
+            const scale = Math.min(scaleX, scaleY);
+
+            const actualPlotWidth = latRange * scale;
+            const actualPlotHeight = longRange * scale;
+
+            const offsetX = marginLeft + (plotWidth - actualPlotWidth) / 2;
+            const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
+
+            // Clear and redraw background
+            drawBackground(ctx, width, height);
+
+            // Draw points
+            points.forEach(point => {
+                // Convert coordinates using equal scale
+                // Longitude (distLong) is vertical: 0 at bottom, 200 at top
+                // Latitude (distLat) is horizontal: -50 at left, 50 at right
+
+                const x = offsetX + (point.distLat - latitudeMin) * scale;
+                const y = offsetY + actualPlotHeight - (point.distLong - longitudeMin) * scale;
+
+                // Skip points outside the visible area
+                if (x < offsetX || x > offsetX + actualPlotWidth ||
+                    y < offsetY || y > offsetY + actualPlotHeight) {
+                    return;
+                }
+
+                // Draw glow
+                ctx.beginPath();
+                ctx.arc(x, y, 8, 0, Math.PI * 2);
+                ctx.fillStyle = COLORS.pointGlow;
+                ctx.fill();
+
+                // Draw point
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = COLORS.point;
+                ctx.fill();
+            });
+
+            // Update point count
+            document.getElementById(`count-${deviceName}`).textContent = points.length;
+
+            // Update timestamp
+            const now = new Date();
+            document.getElementById(`last-update-${deviceName}`).textContent =
+                ` | Last: ${now.toLocaleTimeString()}`;
+        }
+
+        // Redraw all devices with current zoom
+        function redrawAllDevices() {
+            devices.forEach(deviceName => {
+                if (devicePoints[deviceName]) {
+                    drawPoints(deviceName, devicePoints[deviceName]);
+                } else {
+                    // Just redraw background if no points
+                    const canvas = document.getElementById(`canvas-${deviceName}`);
+                    if (canvas) {
+                        const ctx = canvas.getContext('2d');
+                        drawBackground(ctx, canvas.width, canvas.height);
+                    }
+                }
+            });
+        }
+
+        // Zoom handling
+        function handleWheel(event, deviceName) {
+            event.preventDefault();
+
+            const canvas = document.getElementById(`canvas-${deviceName}`);
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            // Calculate margins
+            const marginLeft = 50;
+            const marginBottom = 40;
+            const marginTop = 20;
+            const marginRight = 20;
+
+            const plotWidth = canvas.width - marginLeft - marginRight;
+            const plotHeight = canvas.height - marginTop - marginBottom;
+
+            const longRange = longitudeMax - longitudeMin;
+            const latRange = latitudeMax - latitudeMin;
+
+            const scaleX = plotWidth / latRange;
+            const scaleY = plotHeight / longRange;
+            const scale = Math.min(scaleX, scaleY);
+
+            const actualPlotWidth = latRange * scale;
+            const actualPlotHeight = longRange * scale;
+
+            const offsetX = marginLeft + (plotWidth - actualPlotWidth) / 2;
+            const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
+
+            // Convert mouse position to data coordinates
+            const mouseLat = latitudeMin + (mouseX - offsetX) / scale;
+            const mouseLong = longitudeMin + (actualPlotHeight - (mouseY - offsetY)) / scale;
+
+            // Zoom factor
+            const zoomFactor = event.deltaY > 0 ? 1.2 : 0.8;
+
+            // Calculate new ranges centered on mouse position
+            const newLongRange = (longitudeMax - longitudeMin) * zoomFactor;
+            const newLatRange = (latitudeMax - latitudeMin) * zoomFactor;
+
+            // Limit zoom (don't zoom in too much or out too much)
+            const minRange = 5;  // minimum 5m range
+            const maxLongRange = DEFAULT_LONGITUDE_MAX - DEFAULT_LONGITUDE_MIN;
+            const maxLatRange = DEFAULT_LATITUDE_MAX - DEFAULT_LATITUDE_MIN;
+
+            if (newLongRange < minRange || newLatRange < minRange) return;
+            if (newLongRange > maxLongRange * 2 || newLatRange > maxLatRange * 2) return;
+
+            // Calculate new bounds centered on mouse position
+            const longRatio = (mouseLong - longitudeMin) / (longitudeMax - longitudeMin);
+            const latRatio = (mouseLat - latitudeMin) / (latitudeMax - latitudeMin);
+
+            longitudeMin = mouseLong - newLongRange * longRatio;
+            longitudeMax = mouseLong + newLongRange * (1 - longRatio);
+            latitudeMin = mouseLat - newLatRange * latRatio;
+            latitudeMax = mouseLat + newLatRange * (1 - latRatio);
+
+            // Redraw all devices
+            redrawAllDevices();
+        }
+
+        // Reset zoom to default
+        function resetZoom() {
+            longitudeMin = DEFAULT_LONGITUDE_MIN;
+            longitudeMax = DEFAULT_LONGITUDE_MAX;
+            latitudeMin = DEFAULT_LATITUDE_MIN;
+            latitudeMax = DEFAULT_LATITUDE_MAX;
+            redrawAllDevices();
+        }
+
+        function connectDevice(deviceName) {
+            const wsUrl = `ws://${WS_HOST}:${WS_PORT}/${deviceName}`;
+
+            // Close existing connection if any
+            if (deviceConnections[deviceName]) {
+                deviceConnections[deviceName].close();
+            }
+
+            try {
+                const ws = new WebSocket(wsUrl);
+                deviceConnections[deviceName] = ws;
+
+                ws.onopen = () => {
+                    console.log(`Connected to ${deviceName}`);
+                    updateDeviceStatus(deviceName, true);
+                    updateServerStatus(true);
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const points = JSON.parse(event.data);
+                        drawPoints(deviceName, points);
+                    } catch (error) {
+                        console.error(`Error parsing message for ${deviceName}:`, error);
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log(`Disconnected from ${deviceName}`);
+                    updateDeviceStatus(deviceName, false);
+
+                    // Attempt to reconnect after 3 seconds
+                    setTimeout(() => {
+                        if (deviceConnections[deviceName] === ws) {
+                            console.log(`Attempting to reconnect ${deviceName}...`);
+                            connectDevice(deviceName);
+                        }
+                    }, 3000);
+                };
+
+                ws.onerror = (error) => {
+                    console.error(`WebSocket error for ${deviceName}:`, error);
+                };
+            } catch (error) {
+                console.error(`Failed to connect to ${deviceName}:`, error);
+                updateDeviceStatus(deviceName, false);
+            }
+        }
+
+        function connectAllDevices() {
+            devices.forEach(deviceName => {
+                connectDevice(deviceName);
+            });
+        }
+
+        function updateDeviceStatus(deviceName, connected) {
+            const statusEl = document.getElementById(`status-${deviceName}`);
+            if (statusEl) {
+                statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+                statusEl.className = `device-status ${connected ? 'connected' : 'disconnected'}`;
+            }
+        }
+
+        function updateServerStatus(connected) {
+            const dotEl = document.getElementById('server-status-dot');
+            const textEl = document.getElementById('server-status-text');
+
+            if (connected) {
+                dotEl.className = 'status-dot connected';
+                textEl.textContent = 'Connected';
+            } else {
+                dotEl.className = 'status-dot disconnected';
+                textEl.textContent = 'Disconnected';
+            }
+        }
+
+        function toggleGrid() {
+            showGrid = !showGrid;
+            devices.forEach(deviceName => {
+                const canvas = document.getElementById(`canvas-${deviceName}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    drawBackground(ctx, canvas.width, canvas.height);
+                }
+            });
+        }
+
+        function toggleAxes() {
+            showAxes = !showAxes;
+            devices.forEach(deviceName => {
+                const canvas = document.getElementById(`canvas-${deviceName}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    drawBackground(ctx, canvas.width, canvas.height);
+                }
+            });
+        }
+
+        function clearAllPoints() {
+            devices.forEach(deviceName => {
+                const canvas = document.getElementById(`canvas-${deviceName}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    drawBackground(ctx, canvas.width, canvas.height);
+                }
+                document.getElementById(`count-${deviceName}`).textContent = '0';
+                document.getElementById(`last-update-${deviceName}`).textContent = '';
+            });
+        }
+
+        function resetAll() {
+            // Reset zoom
+            resetZoom();
+            // Clear all points
+            devicePoints = {};
+            // Reset grid and axes to visible
+            showGrid = true;
+            showAxes = true;
+            // Redraw
+            devices.forEach(deviceName => {
+                const canvas = document.getElementById(`canvas-${deviceName}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    drawBackground(ctx, canvas.width, canvas.height);
+                }
+                document.getElementById(`count-${deviceName}`).textContent = '0';
+                document.getElementById(`last-update-${deviceName}`).textContent = '';
+            });
+        }
+
+        function reconnectAll() {
+            devices.forEach(deviceName => {
+                if (deviceConnections[deviceName]) {
+                    deviceConnections[deviceName].close();
+                }
+            });
+            setTimeout(connectAllDevices, 500);
+        }
+
+        // Initialize
+        loadConfig();
+    </script>
+</body>
+
+</html>
