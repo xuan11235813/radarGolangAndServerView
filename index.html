@@ -212,7 +212,7 @@
 
 <body>
     <div class="header">
-        <h1>CAN Bus 2D Point Viewer</h1>
+        <h1>同济大学低空测试</h1>
         <div class="status-bar">
             <div class="status-item">
                 <span>Server:</span>
@@ -566,19 +566,25 @@
 
         // Calculate grid step based on zoom scale
         function calculateGridStep(scale) {
-            const pixelsPer10m = 10 * scale;
-            if (pixelsPer10m >= 50) return 10;
-            if (pixelsPer10m >= 25) return 20;
-            if (pixelsPer10m >= 10) return 50;
+            const pixelsPer1m = 1 * scale;
+            if (pixelsPer1m >= 20) return 1;
+            if (pixelsPer1m >= 10) return 2;
+            if (pixelsPer1m >= 5) return 5;
+            if (pixelsPer1m >= 2.5) return 10;
+            if (pixelsPer1m >= 1) return 20;
+            if (pixelsPer1m >= 0.5) return 50;
             return 100;
         }
 
         // Calculate label step based on zoom scale
         function calculateLabelStep(scale) {
-            const pixelsPer25m = 25 * scale;
-            if (pixelsPer25m >= 80) return 25;
-            if (pixelsPer25m >= 40) return 50;
-            if (pixelsPer25m >= 20) return 100;
+            const pixelsPer1m = 1 * scale;
+            if (pixelsPer1m >= 20) return 2;
+            if (pixelsPer1m >= 10) return 5;
+            if (pixelsPer1m >= 5) return 10;
+            if (pixelsPer1m >= 2) return 20;
+            if (pixelsPer1m >= 1) return 50;
+            if (pixelsPer1m >= 0.5) return 100;
             return 200;
         }
 
