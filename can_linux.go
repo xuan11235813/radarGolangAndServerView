@@ -375,18 +375,18 @@ func (r *LinuxCANReader) isInterfaceUp(interfaceName string) bool {
 
 // bringUpInterface brings up a CAN interface with specified bitrate
 func (r *LinuxCANReader) bringUpInterface(interfaceName string, bitrate int) error {
-	// First, bring down the interface if it's up
-	exec.Command("ip", "link", "set", interfaceName, "down").Run()
+	// First, bring down the interface if it's up (requires sudo)
+	exec.Command("sudo", "ip", "link", "set", interfaceName, "down").Run()
 
-	// Set bitrate
-	cmd := exec.Command("ip", "link", "set", interfaceName, "type", "can", "bitrate", fmt.Sprintf("%d", bitrate))
+	// Set bitrate (requires sudo)
+	cmd := exec.Command("sudo", "ip", "link", "set", interfaceName, "type", "can", "bitrate", fmt.Sprintf("%d", bitrate))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to set bitrate: %v, output: %s", err, string(output))
 	}
 
-	// Bring up the interface
-	cmd = exec.Command("ip", "link", "set", interfaceName, "up")
+	// Bring up the interface (requires sudo)
+	cmd = exec.Command("sudo", "ip", "link", "set", interfaceName, "up")
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to bring up: %v, output: %s", err, string(output))
