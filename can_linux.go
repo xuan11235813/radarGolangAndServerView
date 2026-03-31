@@ -3,15 +3,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"os/exec"
-	"strings"
 	"sync"
 	"time"
+
+	"go.einride.tech/can/pkg/socketcan"
 )
 
-// LinuxCANReader implements CANReader for Linux using SocketCAN (via command line tools)
+// LinuxCANReader implements CANReader for Linux using SocketCAN
 type LinuxCANReader struct {
 	interfaceName string
 	simulated     bool
@@ -22,6 +23,9 @@ type LinuxCANReader struct {
 	stopChan     chan struct{}
 	reading      bool
 	readingMutex sync.Mutex
+
+	// SocketCAN connection
+	conn *socketcan.Conn
 }
 
 // newPlatformCANReader creates a Linux CAN reader
@@ -38,34 +42,21 @@ func newPlatformCANReader() (CANReader, error) {
 func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	r.interfaceName = interfaceName
 
-	// Check if CAN interface exists
-	if !r.checkInterfaceExists(interfaceName) {
-		log.Printf("CAN interface %s not found, running in simulation mode", interfaceName)
+	// Try to dial SocketCAN connection
+	ctx := context.Background()
+	conn, err := socketcan.DialContext(ctx, "can", interfaceName)
+	if err != nil {
+		log.Printf("Failed to open SocketCAN interface %s: %v, running in simulation mode", interfaceName, err)
 		r.simulated = true
-		r.connected = true // Simulation mode is "connected"
-		return nil
-	}
-
-	// Check if interface is already up
-	if r.isInterfaceUp(interfaceName) {
-		log.Printf("CAN interface %s is already up, using it directly", interfaceName)
-		r.simulated = false
 		r.connected = true
 		return nil
 	}
 
-	// Try to bring up the interface
-	err := r.bringUpInterface(interfaceName, bitrate)
-	if err != nil {
-		log.Printf("Failed to bring up %s: %v, running in simulation mode", interfaceName, err)
-		r.simulated = true
-		r.connected = true // Simulation mode is "connected"
-		return nil
-	}
-
-	log.Printf("CAN interface %s opened at %d bps", interfaceName, bitrate)
+	r.conn = conn
 	r.simulated = false
 	r.connected = true
+
+	log.Printf("CAN interface %s opened successfully via SocketCAN", interfaceName)
 	return nil
 }
 
@@ -73,7 +64,12 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 func (r *LinuxCANReader) Close() error {
 	r.StopReading()
 	r.connected = false
-	log.Printf("Closing Linux CAN interface %s", r.interfaceName)
+	if r.conn != nil {
+		err := r.conn.Close()
+		r.conn = nil
+		log.Printf("Closing Linux CAN interface %s", r.interfaceName)
+		return err
+	}
 	return nil
 }
 
@@ -94,13 +90,39 @@ func (r *LinuxCANReader) Read(timeout time.Duration) (*CANFrame, error) {
 		}
 	}
 
-	// Real implementation would use candump or direct socket reading
-	// For this example, we'll simulate even in "real" mode
+	// Real SocketCAN reading
+	if r.conn == nil {
+		return nil, fmt.Errorf("connection not established")
+	}
+
+	// Use a goroutine with timeout for reading
+	frameChan := make(chan *socketcan.Frame, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		var frame socketcan.Frame
+		err := r.conn.Recv(&frame)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		frameChan <- &frame
+	}()
+
 	select {
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("timeout")
-	case <-time.After(100 * time.Millisecond):
-		return generateLinuxFrame(), nil
+	case err := <-errChan:
+		return nil, err
+	case frame := <-frameChan:
+		return &CANFrame{
+			ID:        frame.ID,
+			Data:      frame.Data[:frame.Length],
+			Length:    frame.Length,
+			Timestamp: time.Now(),
+			Extended:  frame.Flags&socketcan.FrameEFF != 0,
+			Remote:    frame.Flags&socketcan.FrameRTR != 0,
+		}, nil
 	}
 }
 
@@ -144,57 +166,30 @@ func (r *LinuxCANReader) continuousRead() {
 		return
 	}
 
-	log.Printf("Starting real CAN reading on interface %s", r.interfaceName)
+	log.Printf("Starting real SocketCAN reading on interface %s", r.interfaceName)
 
-	// Real hardware reading using candump
+	if r.conn == nil {
+		log.Printf("Error: SocketCAN connection is nil")
+		return
+	}
+
 	consecutiveErrors := 0
 	maxConsecutiveErrors := 5
 
-	// Start candump process
-	cmd := exec.Command("candump", r.interfaceName)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("Failed to create candump pipe: %v", err)
-		// Signal disconnection
-		select {
-		case r.frameChan <- nil:
-		default:
-		}
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("Failed to start candump: %v", err)
-		// Signal disconnection
-		select {
-		case r.frameChan <- nil:
-		default:
-		}
-		return
-	}
-
-	log.Printf("candump process started successfully for %s", r.interfaceName)
-
-	// Read from candump output
-	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-r.stopChan:
-			log.Printf("Stop signal received, killing candump process")
-			cmd.Process.Kill()
-			cmd.Wait()
+			log.Printf("Stop signal received, stopping SocketCAN reader")
 			return
 		default:
-			// Set non-blocking read with timeout
-			n, err := stdout.Read(buf)
+			var frame socketcan.Frame
+			err := r.conn.Recv(&frame)
 			if err != nil {
 				consecutiveErrors++
 				log.Printf("CAN read error: %v, consecutive errors: %d", err, consecutiveErrors)
 
 				if consecutiveErrors >= maxConsecutiveErrors {
 					log.Printf("Device %s disconnected, signaling for reconnection", r.interfaceName)
-					cmd.Process.Kill()
-					cmd.Wait()
 					// Signal disconnection
 					select {
 					case r.frameChan <- nil:
@@ -209,74 +204,25 @@ func (r *LinuxCANReader) continuousRead() {
 			// Reset error count on successful read
 			consecutiveErrors = 0
 
-			// Debug: log raw output
-			rawOutput := string(buf[:n])
-			log.Printf("Received %d bytes from candump: %q", n, rawOutput)
-
-			// Parse candump output and send frames
-			// Format: "can0 123#1122334455667788"
-			lines := strings.Split(rawOutput, "\n")
-			parsedCount := 0
-			for _, line := range lines {
-				frame := parseCandumpLine(line)
-				if frame != nil {
-					parsedCount++
-					select {
-					case r.frameChan <- frame:
-						// Frame sent successfully
-					default:
-						log.Printf("Warning: Frame channel full, dropping frame ID: %X", frame.ID)
-					}
-				}
+			// Convert socketcan.Frame to CANFrame
+			canFrame := &CANFrame{
+				ID:        frame.ID,
+				Data:      make([]byte, frame.Length),
+				Length:    frame.Length,
+				Timestamp: time.Now(),
+				Extended:  frame.Flags&socketcan.FrameEFF != 0,
+				Remote:    frame.Flags&socketcan.FrameRTR != 0,
 			}
-			log.Printf("Parsed %d frames from %d lines", parsedCount, len(lines))
+			copy(canFrame.Data, frame.Data[:frame.Length])
+
+			// Send frame to channel (non-blocking)
+			select {
+			case r.frameChan <- canFrame:
+				// Frame sent successfully
+			default:
+				log.Printf("Warning: Frame channel full, dropping frame ID: %X", canFrame.ID)
+			}
 		}
-	}
-}
-
-// parseCandumpLine parses a line from candump output
-func parseCandumpLine(line string) *CANFrame {
-	// Expected format: "  can0  123#1122334455667788"
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil
-	}
-
-	// Split by whitespace
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return nil
-	}
-
-	// Parse ID and data (format: "ID#DATA")
-	idData := parts[len(parts)-1]
-	idDataParts := strings.Split(idData, "#")
-	if len(idDataParts) != 2 {
-		return nil
-	}
-
-	// Parse ID
-	var id uint32
-	fmt.Sscanf(idDataParts[0], "%X", &id)
-
-	// Parse data
-	dataStr := idDataParts[1]
-	data := make([]byte, 0, 8)
-	for i := 0; i < len(dataStr); i += 2 {
-		if i+1 < len(dataStr) {
-			var b byte
-			fmt.Sscanf(dataStr[i:i+2], "%02X", &b)
-			data = append(data, b)
-		}
-	}
-
-	return &CANFrame{
-		ID:        id,
-		Data:      data,
-		Length:    uint8(len(data)),
-		Timestamp: time.Now(),
-		Extended:  id > 0x7FF,
-		Remote:    false,
 	}
 }
 
@@ -323,22 +269,24 @@ func (r *LinuxCANReader) Write(frame *CANFrame) error {
 		return nil
 	}
 
-	// Real implementation would use cansend command
-	// cansend can0 123#11223344
-	dataHex := ""
-	for _, b := range frame.Data {
-		dataHex += fmt.Sprintf("%02X", b)
+	if r.conn == nil {
+		return fmt.Errorf("connection not established")
 	}
 
-	cmd := exec.Command("cansend", r.interfaceName,
-		fmt.Sprintf("%X#%s", frame.ID, dataHex))
+	// Create socketcan.Frame
+	var canFrame socketcan.Frame
+	canFrame.ID = frame.ID
+	canFrame.Length = frame.Length
+	copy(canFrame.Data[:], frame.Data)
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cansend failed: %v, output: %s", err, output)
+	if frame.Extended {
+		canFrame.Flags |= socketcan.FrameEFF
+	}
+	if frame.Remote {
+		canFrame.Flags |= socketcan.FrameRTR
 	}
 
-	return nil
+	return r.conn.Send(canFrame)
 }
 
 // SetFilter sets acceptance filters
@@ -351,48 +299,8 @@ func (r *LinuxCANReader) SetFilter(filters []Filter) error {
 			i+1, filter.ID, filter.Mask, filter.Extend)
 	}
 
-	return nil
-}
-
-// checkInterfaceExists checks if a CAN interface exists
-func (r *LinuxCANReader) checkInterfaceExists(interfaceName string) bool {
-	cmd := exec.Command("ip", "link", "show", interfaceName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(output), interfaceName)
-}
-
-// isInterfaceUp checks if a CAN interface is already up and running
-func (r *LinuxCANReader) isInterfaceUp(interfaceName string) bool {
-	cmd := exec.Command("ip", "link", "show", interfaceName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-
-	// Check if the interface state is "UP"
-	outputStr := string(output)
-	return strings.Contains(outputStr, "state UP") || strings.Contains(outputStr, "UNKNOWN")
-}
-
-// bringUpInterface brings up a CAN interface with specified bitrate
-func (r *LinuxCANReader) bringUpInterface(interfaceName string, bitrate int) error {
-	// First, bring down the interface if it's up
-	exec.Command("sudo", "ip", "link", "set", interfaceName, "down").Run()
-
-	// Set bitrate and bring up
-	cmd := exec.Command("sudo", "ip", "link", "set", interfaceName,
-		"up", "type", "can", "bitrate", fmt.Sprintf("%d", bitrate))
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to bring up %s: %v, output: %s",
-			interfaceName, err, string(output))
-	}
-
+	// Note: SocketCAN filtering would require ioctl calls
+	// For now, we'll filter in software
 	return nil
 }
 

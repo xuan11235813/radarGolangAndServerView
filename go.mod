@@ -7,4 +7,9 @@ go 1.25.0
 // require golang.org/x/sys v0.0.0-20231013013702-6e08d5d9d8b1
 // For Windows PCAN, you might need a PCAN Basic wrapper
 
-require golang.org/x/net v0.52.0 // indirect
+require (
+	go.einride.tech/can v0.17.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sync v0.11.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+)
