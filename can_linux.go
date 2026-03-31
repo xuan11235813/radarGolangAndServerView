@@ -144,6 +144,8 @@ func (r *LinuxCANReader) continuousRead() {
 		return
 	}
 
+	log.Printf("Starting real CAN reading on interface %s", r.interfaceName)
+
 	// Real hardware reading using candump
 	consecutiveErrors := 0
 	maxConsecutiveErrors := 5
@@ -171,11 +173,14 @@ func (r *LinuxCANReader) continuousRead() {
 		return
 	}
 
+	log.Printf("candump process started successfully for %s", r.interfaceName)
+
 	// Read from candump output
-	buf := make([]byte, 1024)
+	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-r.stopChan:
+			log.Printf("Stop signal received, killing candump process")
 			cmd.Process.Kill()
 			cmd.Wait()
 			return
@@ -204,12 +209,18 @@ func (r *LinuxCANReader) continuousRead() {
 			// Reset error count on successful read
 			consecutiveErrors = 0
 
+			// Debug: log raw output
+			rawOutput := string(buf[:n])
+			log.Printf("Received %d bytes from candump: %q", n, rawOutput)
+
 			// Parse candump output and send frames
 			// Format: "can0 123#1122334455667788"
-			lines := strings.Split(string(buf[:n]), "\n")
+			lines := strings.Split(rawOutput, "\n")
+			parsedCount := 0
 			for _, line := range lines {
 				frame := parseCandumpLine(line)
 				if frame != nil {
+					parsedCount++
 					select {
 					case r.frameChan <- frame:
 						// Frame sent successfully
@@ -218,6 +229,7 @@ func (r *LinuxCANReader) continuousRead() {
 					}
 				}
 			}
+			log.Printf("Parsed %d frames from %d lines", parsedCount, len(lines))
 		}
 	}
 }
