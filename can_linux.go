@@ -46,6 +46,14 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 		return nil
 	}
 
+	// Check if interface is already up
+	if r.isInterfaceUp(interfaceName) {
+		log.Printf("CAN interface %s is already up, using it directly", interfaceName)
+		r.simulated = false
+		r.connected = true
+		return nil
+	}
+
 	// Try to bring up the interface
 	err := r.bringUpInterface(interfaceName, bitrate)
 	if err != nil {
@@ -343,6 +351,19 @@ func (r *LinuxCANReader) checkInterfaceExists(interfaceName string) bool {
 	}
 
 	return strings.Contains(string(output), interfaceName)
+}
+
+// isInterfaceUp checks if a CAN interface is already up and running
+func (r *LinuxCANReader) isInterfaceUp(interfaceName string) bool {
+	cmd := exec.Command("ip", "link", "show", interfaceName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	// Check if the interface state is "UP"
+	outputStr := string(output)
+	return strings.Contains(outputStr, "state UP") || strings.Contains(outputStr, "UNKNOWN")
 }
 
 // bringUpInterface brings up a CAN interface with specified bitrate
