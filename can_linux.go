@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
+	"go.einride.tech/can"
 	"go.einride.tech/can/pkg/socketcan"
 )
 
@@ -25,7 +27,9 @@ type LinuxCANReader struct {
 	readingMutex sync.Mutex
 
 	// SocketCAN connection
-	conn *socketcan.Conn
+	conn        net.Conn
+	receiver    *socketcan.Receiver
+	transmitter *socketcan.Transmitter
 }
 
 // newPlatformCANReader creates a Linux CAN reader
@@ -53,6 +57,8 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	}
 
 	r.conn = conn
+	r.receiver = socketcan.NewReceiver(conn)
+	r.transmitter = socketcan.NewTransmitter(conn)
 	r.simulated = false
 	r.connected = true
 
@@ -64,6 +70,14 @@ func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 func (r *LinuxCANReader) Close() error {
 	r.StopReading()
 	r.connected = false
+	if r.receiver != nil {
+		r.receiver.Close()
+		r.receiver = nil
+	}
+	if r.transmitter != nil {
+		r.transmitter.Close()
+		r.transmitter = nil
+	}
 	if r.conn != nil {
 		err := r.conn.Close()
 		r.conn = nil
@@ -91,22 +105,21 @@ func (r *LinuxCANReader) Read(timeout time.Duration) (*CANFrame, error) {
 	}
 
 	// Real SocketCAN reading
-	if r.conn == nil {
+	if r.receiver == nil {
 		return nil, fmt.Errorf("connection not established")
 	}
 
 	// Use a goroutine with timeout for reading
-	frameChan := make(chan *socketcan.Frame, 1)
+	frameChan := make(chan *can.Frame, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
-		var frame socketcan.Frame
-		err := r.conn.Recv(&frame)
-		if err != nil {
-			errChan <- err
-			return
+		if r.receiver.Receive() {
+			frame := r.receiver.Frame()
+			frameChan <- &frame
+		} else {
+			errChan <- r.receiver.Err()
 		}
-		frameChan <- &frame
 	}()
 
 	select {
@@ -115,13 +128,15 @@ func (r *LinuxCANReader) Read(timeout time.Duration) (*CANFrame, error) {
 	case err := <-errChan:
 		return nil, err
 	case frame := <-frameChan:
+		data := make([]byte, frame.Length)
+		copy(data, frame.Data[:frame.Length])
 		return &CANFrame{
 			ID:        frame.ID,
-			Data:      frame.Data[:frame.Length],
+			Data:      data,
 			Length:    frame.Length,
 			Timestamp: time.Now(),
-			Extended:  frame.Flags&socketcan.FrameEFF != 0,
-			Remote:    frame.Flags&socketcan.FrameRTR != 0,
+			Extended:  frame.IsExtended,
+			Remote:    frame.IsRemote,
 		}, nil
 	}
 }
@@ -168,8 +183,8 @@ func (r *LinuxCANReader) continuousRead() {
 
 	log.Printf("Starting real SocketCAN reading on interface %s", r.interfaceName)
 
-	if r.conn == nil {
-		log.Printf("Error: SocketCAN connection is nil")
+	if r.receiver == nil {
+		log.Printf("Error: SocketCAN receiver is nil")
 		return
 	}
 
@@ -182,45 +197,56 @@ func (r *LinuxCANReader) continuousRead() {
 			log.Printf("Stop signal received, stopping SocketCAN reader")
 			return
 		default:
-			var frame socketcan.Frame
-			err := r.conn.Recv(&frame)
-			if err != nil {
-				consecutiveErrors++
-				log.Printf("CAN read error: %v, consecutive errors: %d", err, consecutiveErrors)
+			if r.receiver.Receive() {
+				// Reset error count on successful read
+				consecutiveErrors = 0
 
-				if consecutiveErrors >= maxConsecutiveErrors {
-					log.Printf("Device %s disconnected, signaling for reconnection", r.interfaceName)
-					// Signal disconnection
-					select {
-					case r.frameChan <- nil:
-					default:
-					}
-					return
+				frame := r.receiver.Frame()
+
+				// Check if it's an error frame
+				if r.receiver.HasErrorFrame() {
+					log.Printf("Received error frame: %v", r.receiver.ErrorFrame())
+					continue
 				}
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
 
-			// Reset error count on successful read
-			consecutiveErrors = 0
+				// Convert can.Frame to CANFrame
+				data := make([]byte, frame.Length)
+				copy(data, frame.Data[:frame.Length])
 
-			// Convert socketcan.Frame to CANFrame
-			canFrame := &CANFrame{
-				ID:        frame.ID,
-				Data:      make([]byte, frame.Length),
-				Length:    frame.Length,
-				Timestamp: time.Now(),
-				Extended:  frame.Flags&socketcan.FrameEFF != 0,
-				Remote:    frame.Flags&socketcan.FrameRTR != 0,
-			}
-			copy(canFrame.Data, frame.Data[:frame.Length])
+				canFrame := &CANFrame{
+					ID:        frame.ID,
+					Data:      data,
+					Length:    frame.Length,
+					Timestamp: time.Now(),
+					Extended:  frame.IsExtended,
+					Remote:    frame.IsRemote,
+				}
 
-			// Send frame to channel (non-blocking)
-			select {
-			case r.frameChan <- canFrame:
-				// Frame sent successfully
-			default:
-				log.Printf("Warning: Frame channel full, dropping frame ID: %X", canFrame.ID)
+				// Send frame to channel (non-blocking)
+				select {
+				case r.frameChan <- canFrame:
+					// Frame sent successfully
+				default:
+					log.Printf("Warning: Frame channel full, dropping frame ID: %X", canFrame.ID)
+				}
+			} else {
+				// Receive returned false, check for error
+				err := r.receiver.Err()
+				if err != nil {
+					consecutiveErrors++
+					log.Printf("CAN read error: %v, consecutive errors: %d", err, consecutiveErrors)
+
+					if consecutiveErrors >= maxConsecutiveErrors {
+						log.Printf("Device %s disconnected, signaling for reconnection", r.interfaceName)
+						// Signal disconnection
+						select {
+						case r.frameChan <- nil:
+						default:
+						}
+						return
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
 			}
 		}
 	}
@@ -269,24 +295,20 @@ func (r *LinuxCANReader) Write(frame *CANFrame) error {
 		return nil
 	}
 
-	if r.conn == nil {
+	if r.transmitter == nil {
 		return fmt.Errorf("connection not established")
 	}
 
-	// Create socketcan.Frame
-	var canFrame socketcan.Frame
+	// Create can.Frame
+	var canFrame can.Frame
 	canFrame.ID = frame.ID
 	canFrame.Length = frame.Length
+	canFrame.IsExtended = frame.Extended
+	canFrame.IsRemote = frame.Remote
 	copy(canFrame.Data[:], frame.Data)
 
-	if frame.Extended {
-		canFrame.Flags |= socketcan.FrameEFF
-	}
-	if frame.Remote {
-		canFrame.Flags |= socketcan.FrameRTR
-	}
-
-	return r.conn.Send(canFrame)
+	ctx := context.Background()
+	return r.transmitter.TransmitFrame(ctx, canFrame)
 }
 
 // SetFilter sets acceptance filters
