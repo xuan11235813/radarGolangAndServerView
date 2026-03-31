@@ -671,7 +671,7 @@ func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General, csvCh
 	for {
 		select {
 		case msg := <-ch0:
-			fmt.Printf("[0x600] %+v\n", msg)
+			fmt.Printf(interfaceName+"[0x600] %+v\n", msg)
 			var frameItem DataFrame
 			frameItem.InterfaceName = interfaceName
 			frameItem.FrameData = make([]Cluster1General, len(dataVec))
@@ -681,7 +681,7 @@ func implementFrameData(ch0 chan Cluster0Status, ch1 chan Cluster1General, csvCh
 		case msg := <-ch1:
 			dataVec = append(dataVec, msg)
 			// Use the compact format for real-time updates
-			printCluster1GeneralLine(msg)
+			//printCluster1GeneralLine(msg)
 			// Send to CSV recording channel (non-blocking to prevent any slowdown)
 			select {
 			case csvCh <- msg:
