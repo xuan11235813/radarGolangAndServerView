@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +47,27 @@ func newPlatformCANReader() (CANReader, error) {
 // Open opens a SocketCAN interface
 func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	r.interfaceName = interfaceName
+
+	// Check if CAN interface exists
+	if !r.checkInterfaceExists(interfaceName) {
+		log.Printf("CAN interface %s not found, running in simulation mode", interfaceName)
+		r.simulated = true
+		r.connected = true
+		return nil
+	}
+
+	// Check if interface is up, if not bring it up
+	if !r.isInterfaceUp(interfaceName) {
+		log.Printf("CAN interface %s is down, attempting to bring it up", interfaceName)
+		err := r.bringUpInterface(interfaceName, bitrate)
+		if err != nil {
+			log.Printf("Failed to bring up %s: %v, running in simulation mode", interfaceName, err)
+			r.simulated = true
+			r.connected = true
+			return nil
+		}
+		log.Printf("CAN interface %s brought up successfully", interfaceName)
+	}
 
 	// Try to dial SocketCAN connection
 	ctx := context.Background()
@@ -323,6 +346,52 @@ func (r *LinuxCANReader) SetFilter(filters []Filter) error {
 
 	// Note: SocketCAN filtering would require ioctl calls
 	// For now, we'll filter in software
+	return nil
+}
+
+// checkInterfaceExists checks if a CAN interface exists
+func (r *LinuxCANReader) checkInterfaceExists(interfaceName string) bool {
+	cmd := exec.Command("ip", "link", "show", interfaceName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	return strings.Contains(string(output), interfaceName)
+}
+
+// isInterfaceUp checks if a CAN interface is already up and running
+func (r *LinuxCANReader) isInterfaceUp(interfaceName string) bool {
+	cmd := exec.Command("ip", "link", "show", interfaceName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	// Check if the interface state is "UP"
+	outputStr := string(output)
+	return strings.Contains(outputStr, "state UP") || strings.Contains(outputStr, "UNKNOWN")
+}
+
+// bringUpInterface brings up a CAN interface with specified bitrate
+func (r *LinuxCANReader) bringUpInterface(interfaceName string, bitrate int) error {
+	// First, bring down the interface if it's up
+	exec.Command("ip", "link", "set", interfaceName, "down").Run()
+
+	// Set bitrate
+	cmd := exec.Command("ip", "link", "set", interfaceName, "type", "can", "bitrate", fmt.Sprintf("%d", bitrate))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set bitrate: %v, output: %s", err, string(output))
+	}
+
+	// Bring up the interface
+	cmd = exec.Command("ip", "link", "set", interfaceName, "up")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to bring up: %v, output: %s", err, string(output))
+	}
+
 	return nil
 }
 
