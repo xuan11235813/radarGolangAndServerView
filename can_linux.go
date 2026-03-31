@@ -48,45 +48,46 @@ func newPlatformCANReader() (CANReader, error) {
 func (r *LinuxCANReader) Open(interfaceName string, bitrate int) error {
 	r.interfaceName = interfaceName
 
-	// Check if CAN interface exists
-	if !r.checkInterfaceExists(interfaceName) {
-		log.Printf("CAN interface %s not found, running in simulation mode", interfaceName)
-		r.simulated = true
-		r.connected = true
-		return nil
-	}
+	retryInterval := 2 * time.Second
 
-	// Check if interface is up, if not bring it up
-	if !r.isInterfaceUp(interfaceName) {
-		log.Printf("CAN interface %s is down, attempting to bring it up", interfaceName)
-		err := r.bringUpInterface(interfaceName, bitrate)
-		if err != nil {
-			log.Printf("Failed to bring up %s: %v, running in simulation mode", interfaceName, err)
-			r.simulated = true
-			r.connected = true
-			return nil
+	for {
+		// Check if CAN interface exists
+		if !r.checkInterfaceExists(interfaceName) {
+			log.Printf("CAN interface %s not found, retrying in %v...", interfaceName, retryInterval)
+			time.Sleep(retryInterval)
+			continue
 		}
-		log.Printf("CAN interface %s brought up successfully", interfaceName)
-	}
 
-	// Try to dial SocketCAN connection
-	ctx := context.Background()
-	conn, err := socketcan.DialContext(ctx, "can", interfaceName)
-	if err != nil {
-		log.Printf("Failed to open SocketCAN interface %s: %v, running in simulation mode", interfaceName, err)
-		r.simulated = true
+		// Check if interface is up, if not bring it up
+		if !r.isInterfaceUp(interfaceName) {
+			log.Printf("CAN interface %s is down, attempting to bring it up", interfaceName)
+			err := r.bringUpInterface(interfaceName, bitrate)
+			if err != nil {
+				log.Printf("Failed to bring up %s: %v, retrying in %v...", interfaceName, err, retryInterval)
+				time.Sleep(retryInterval)
+				continue
+			}
+			log.Printf("CAN interface %s brought up successfully", interfaceName)
+		}
+
+		// Try to dial SocketCAN connection
+		ctx := context.Background()
+		conn, err := socketcan.DialContext(ctx, "can", interfaceName)
+		if err != nil {
+			log.Printf("Failed to open SocketCAN interface %s: %v, retrying in %v...", interfaceName, err, retryInterval)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		r.conn = conn
+		r.receiver = socketcan.NewReceiver(conn)
+		r.transmitter = socketcan.NewTransmitter(conn)
+		r.simulated = false
 		r.connected = true
+
+		log.Printf("CAN interface %s opened successfully via SocketCAN", interfaceName)
 		return nil
 	}
-
-	r.conn = conn
-	r.receiver = socketcan.NewReceiver(conn)
-	r.transmitter = socketcan.NewTransmitter(conn)
-	r.simulated = false
-	r.connected = true
-
-	log.Printf("CAN interface %s opened successfully via SocketCAN", interfaceName)
-	return nil
 }
 
 // Close closes the CAN interface
