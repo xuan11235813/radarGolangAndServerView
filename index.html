@@ -257,14 +257,28 @@
         const DEFAULT_LATITUDE_MIN = -50;
         const DEFAULT_LATITUDE_MAX = 50;
 
-        // Current axis ranges (can be modified by zoom)
-        let longitudeMin = DEFAULT_LONGITUDE_MIN;
-        let longitudeMax = DEFAULT_LONGITUDE_MAX;
-        let latitudeMin = DEFAULT_LATITUDE_MIN;
-        let latitudeMax = DEFAULT_LATITUDE_MAX;
+        // Per-device axis ranges (can be modified by zoom)
+        let deviceViewStates = {};
 
         // Store last points for each device (for redrawing on zoom)
         let devicePoints = {};
+
+        // Initialize device view state
+        function initDeviceViewState(deviceName) {
+            deviceViewStates[deviceName] = {
+                longitudeMin: DEFAULT_LONGITUDE_MIN,
+                longitudeMax: DEFAULT_LONGITUDE_MAX,
+                latitudeMin: DEFAULT_LATITUDE_MIN,
+                latitudeMax: DEFAULT_LATITUDE_MAX,
+                isDragging: false,
+                dragStartX: 0,
+                dragStartY: 0,
+                dragStartLongMin: 0,
+                dragStartLongMax: 0,
+                dragStartLatMin: 0,
+                dragStartLatMax: 0
+            };
+        }
 
         // Colors
         const COLORS = {
@@ -358,29 +372,23 @@
 
             // Redraw
             const ctx = canvas.getContext('2d');
-            drawBackground(ctx, canvas.width, canvas.height);
+            drawBackground(ctx, canvas.width, canvas.height, deviceName);
         }
 
-        // Drag state
-        let isDragging = false;
-        let dragStartX = 0;
-        let dragStartY = 0;
-        let dragStartLongMin = 0;
-        let dragStartLongMax = 0;
-        let dragStartLatMin = 0;
-        let dragStartLatMax = 0;
-
         function initCanvas(deviceName) {
+            // Initialize view state for this device
+            initDeviceViewState(deviceName);
+
             const canvas = document.getElementById(`canvas-${deviceName}`);
 
             // Add wheel event listener for zoom
             canvas.addEventListener('wheel', (event) => handleWheel(event, deviceName), { passive: false });
 
             // Add mouse event listeners for panning
-            canvas.addEventListener('mousedown', handleMouseDown);
-            canvas.addEventListener('mousemove', handleMouseMove);
-            canvas.addEventListener('mouseup', handleMouseUp);
-            canvas.addEventListener('mouseleave', handleMouseUp);
+            canvas.addEventListener('mousedown', (event) => handleMouseDown(event, deviceName));
+            canvas.addEventListener('mousemove', (event) => handleMouseMove(event, deviceName));
+            canvas.addEventListener('mouseup', (event) => handleMouseUp(event, deviceName));
+            canvas.addEventListener('mouseleave', (event) => handleMouseUp(event, deviceName));
 
             // Use requestAnimationFrame to ensure container is rendered
             requestAnimationFrame(() => {
@@ -388,21 +396,23 @@
             });
         }
 
-        function handleMouseDown(event) {
+        function handleMouseDown(event, deviceName) {
             if (event.button === 0) { // Left click
-                isDragging = true;
-                dragStartX = event.clientX;
-                dragStartY = event.clientY;
-                dragStartLongMin = longitudeMin;
-                dragStartLongMax = longitudeMax;
-                dragStartLatMin = latitudeMin;
-                dragStartLatMax = latitudeMax;
+                const state = deviceViewStates[deviceName];
+                state.isDragging = true;
+                state.dragStartX = event.clientX;
+                state.dragStartY = event.clientY;
+                state.dragStartLongMin = state.longitudeMin;
+                state.dragStartLongMax = state.longitudeMax;
+                state.dragStartLatMin = state.latitudeMin;
+                state.dragStartLatMax = state.latitudeMax;
                 event.target.style.cursor = 'grabbing';
             }
         }
 
-        function handleMouseMove(event) {
-            if (!isDragging) return;
+        function handleMouseMove(event, deviceName) {
+            const state = deviceViewStates[deviceName];
+            if (!state.isDragging) return;
 
             const canvas = event.target;
             const rect = canvas.getBoundingClientRect();
@@ -418,8 +428,8 @@
             const plotWidth = canvas.width - marginLeft - marginRight;
             const plotHeight = canvas.height - marginTop - marginBottom;
 
-            const longRange = dragStartLongMax - dragStartLongMin;
-            const latRange = dragStartLatMax - dragStartLatMin;
+            const longRange = state.dragStartLongMax - state.dragStartLongMin;
+            const latRange = state.dragStartLatMax - state.dragStartLatMin;
 
             const scaleX = plotWidth / latRange;
             const scaleY = plotHeight / longRange;
@@ -432,36 +442,41 @@
             const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
 
             // Calculate pixel delta
-            const deltaX = event.clientX - dragStartX;
-            const deltaY = event.clientY - dragStartY;
+            const deltaX = event.clientX - state.dragStartX;
+            const deltaY = event.clientY - state.dragStartY;
 
             // Convert to data coordinates (inverted for Y)
             const dataDeltaX = -deltaX / scale;
             const dataDeltaY = deltaY / scale;
 
             // Apply pan
-            longitudeMin = dragStartLongMin + dataDeltaY;
-            longitudeMax = dragStartLongMax + dataDeltaY;
-            latitudeMin = dragStartLatMin + dataDeltaX;
-            latitudeMax = dragStartLatMax + dataDeltaX;
+            state.longitudeMin = state.dragStartLongMin + dataDeltaY;
+            state.longitudeMax = state.dragStartLongMax + dataDeltaY;
+            state.latitudeMin = state.dragStartLatMin + dataDeltaX;
+            state.latitudeMax = state.dragStartLatMax + dataDeltaX;
 
-            // Redraw all devices
-            redrawAllDevices();
+            // Redraw only this device
+            redrawDevice(deviceName);
         }
 
-        function handleMouseUp(event) {
-            if (isDragging) {
-                isDragging = false;
+        function handleMouseUp(event, deviceName) {
+            const state = deviceViewStates[deviceName];
+            if (state.isDragging) {
+                state.isDragging = false;
                 if (event.target) {
                     event.target.style.cursor = 'default';
                 }
             }
         }
 
-        function drawBackground(ctx, width, height) {
+        function drawBackground(ctx, width, height, deviceName) {
             // Clear canvas
             ctx.fillStyle = COLORS.background;
             ctx.fillRect(0, 0, width, height);
+
+            // Get device-specific view state
+            const state = deviceViewStates[deviceName];
+            if (!state) return;
 
             // Calculate margins for labels
             const marginLeft = 50;
@@ -473,8 +488,8 @@
             const plotHeight = height - marginTop - marginBottom;
 
             // Calculate scale to ensure equal unit length for both axes (using current zoom)
-            const longRange = longitudeMax - longitudeMin;
-            const latRange = latitudeMax - latitudeMin;
+            const longRange = state.longitudeMax - state.longitudeMin;
+            const latRange = state.latitudeMax - state.latitudeMin;
 
             // Calculate pixels per meter for each axis
             const scaleX = plotWidth / latRange;
@@ -500,9 +515,9 @@
                 const gridStep = calculateGridStep(scale);
 
                 // Vertical grid lines (latitude)
-                const latStart = Math.ceil(latitudeMin / gridStep) * gridStep;
-                for (let lat = latStart; lat <= latitudeMax; lat += gridStep) {
-                    const x = offsetX + (lat - latitudeMin) * scale;
+                const latStart = Math.ceil(state.latitudeMin / gridStep) * gridStep;
+                for (let lat = latStart; lat <= state.latitudeMax; lat += gridStep) {
+                    const x = offsetX + (lat - state.latitudeMin) * scale;
                     ctx.beginPath();
                     ctx.moveTo(x, offsetY);
                     ctx.lineTo(x, offsetY + actualPlotHeight);
@@ -510,9 +525,9 @@
                 }
 
                 // Horizontal grid lines (longitude)
-                const longStart = Math.ceil(longitudeMin / gridStep) * gridStep;
-                for (let long = longStart; long <= longitudeMax; long += gridStep) {
-                    const y = offsetY + actualPlotHeight - (long - longitudeMin) * scale;
+                const longStart = Math.ceil(state.longitudeMin / gridStep) * gridStep;
+                for (let long = longStart; long <= state.longitudeMax; long += gridStep) {
+                    const y = offsetY + actualPlotHeight - (long - state.longitudeMin) * scale;
                     ctx.beginPath();
                     ctx.moveTo(offsetX, y);
                     ctx.lineTo(offsetX + actualPlotWidth, y);
@@ -546,18 +561,18 @@
 
                 // X-axis labels (Latitude)
                 ctx.textAlign = 'center';
-                const latLabelStart = Math.ceil(latitudeMin / labelStep) * labelStep;
-                for (let lat = latLabelStart; lat <= latitudeMax; lat += labelStep) {
-                    const x = offsetX + (lat - latitudeMin) * scale;
+                const latLabelStart = Math.ceil(state.latitudeMin / labelStep) * labelStep;
+                for (let lat = latLabelStart; lat <= state.latitudeMax; lat += labelStep) {
+                    const x = offsetX + (lat - state.latitudeMin) * scale;
                     ctx.fillText(`${lat.toFixed(0)}m`, x, offsetY + actualPlotHeight + 15);
                 }
                 ctx.fillText('Latitude', offsetX + actualPlotWidth / 2, height - 5);
 
                 // Y-axis labels (Longitude)
                 ctx.textAlign = 'right';
-                const longLabelStart = Math.ceil(longitudeMin / labelStep) * labelStep;
-                for (let long = longLabelStart; long <= longitudeMax; long += labelStep) {
-                    const y = offsetY + actualPlotHeight - (long - longitudeMin) * scale;
+                const longLabelStart = Math.ceil(state.longitudeMin / labelStep) * labelStep;
+                for (let long = longLabelStart; long <= state.longitudeMax; long += labelStep) {
+                    const y = offsetY + actualPlotHeight - (long - state.longitudeMin) * scale;
                     ctx.fillText(`${long.toFixed(0)}m`, offsetX - 5, y + 4);
                 }
 
@@ -604,6 +619,10 @@
             const width = canvas.width;
             const height = canvas.height;
 
+            // Get device-specific view state
+            const state = deviceViewStates[deviceName];
+            if (!state) return;
+
             // Calculate margins (same as drawBackground)
             const marginLeft = 50;
             const marginBottom = 40;
@@ -614,8 +633,8 @@
             const plotHeight = height - marginTop - marginBottom;
 
             // Calculate scale to ensure equal unit length for both axes (using current zoom)
-            const longRange = longitudeMax - longitudeMin;
-            const latRange = latitudeMax - latitudeMin;
+            const longRange = state.longitudeMax - state.longitudeMin;
+            const latRange = state.latitudeMax - state.latitudeMin;
 
             const scaleX = plotWidth / latRange;
             const scaleY = plotHeight / longRange;
@@ -628,7 +647,7 @@
             const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
 
             // Clear and redraw background
-            drawBackground(ctx, width, height);
+            drawBackground(ctx, width, height, deviceName);
 
             // Draw points
             points.forEach(point => {
@@ -636,8 +655,8 @@
                 // Longitude (distLong) is vertical: 0 at bottom, 200 at top
                 // Latitude (distLat) is horizontal: -50 at left, 50 at right
 
-                const x = offsetX + (point.distLat - latitudeMin) * scale;
-                const y = offsetY + actualPlotHeight - (point.distLong - longitudeMin) * scale;
+                const x = offsetX + (point.distLat - state.latitudeMin) * scale;
+                const y = offsetY + actualPlotHeight - (point.distLong - state.longitudeMin) * scale;
 
                 // Skip points outside the visible area
                 if (x < offsetX || x > offsetX + actualPlotWidth ||
@@ -667,25 +686,33 @@
                 ` | Last: ${now.toLocaleTimeString()}`;
         }
 
+        // Redraw a single device with current zoom
+        function redrawDevice(deviceName) {
+            if (devicePoints[deviceName]) {
+                drawPoints(deviceName, devicePoints[deviceName]);
+            } else {
+                // Just redraw background if no points
+                const canvas = document.getElementById(`canvas-${deviceName}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    drawBackground(ctx, canvas.width, canvas.height, deviceName);
+                }
+            }
+        }
+
         // Redraw all devices with current zoom
         function redrawAllDevices() {
             devices.forEach(deviceName => {
-                if (devicePoints[deviceName]) {
-                    drawPoints(deviceName, devicePoints[deviceName]);
-                } else {
-                    // Just redraw background if no points
-                    const canvas = document.getElementById(`canvas-${deviceName}`);
-                    if (canvas) {
-                        const ctx = canvas.getContext('2d');
-                        drawBackground(ctx, canvas.width, canvas.height);
-                    }
-                }
+                redrawDevice(deviceName);
             });
         }
 
         // Zoom handling
         function handleWheel(event, deviceName) {
             event.preventDefault();
+
+            const state = deviceViewStates[deviceName];
+            if (!state) return;
 
             const canvas = document.getElementById(`canvas-${deviceName}`);
             const rect = canvas.getBoundingClientRect();
@@ -701,8 +728,8 @@
             const plotWidth = canvas.width - marginLeft - marginRight;
             const plotHeight = canvas.height - marginTop - marginBottom;
 
-            const longRange = longitudeMax - longitudeMin;
-            const latRange = latitudeMax - latitudeMin;
+            const longRange = state.longitudeMax - state.longitudeMin;
+            const latRange = state.latitudeMax - state.latitudeMin;
 
             const scaleX = plotWidth / latRange;
             const scaleY = plotHeight / longRange;
@@ -715,15 +742,15 @@
             const offsetY = marginTop + (plotHeight - actualPlotHeight) / 2;
 
             // Convert mouse position to data coordinates
-            const mouseLat = latitudeMin + (mouseX - offsetX) / scale;
-            const mouseLong = longitudeMin + (actualPlotHeight - (mouseY - offsetY)) / scale;
+            const mouseLat = state.latitudeMin + (mouseX - offsetX) / scale;
+            const mouseLong = state.longitudeMin + (actualPlotHeight - (mouseY - offsetY)) / scale;
 
             // Zoom factor
             const zoomFactor = event.deltaY > 0 ? 1.2 : 0.8;
 
             // Calculate new ranges centered on mouse position
-            const newLongRange = (longitudeMax - longitudeMin) * zoomFactor;
-            const newLatRange = (latitudeMax - latitudeMin) * zoomFactor;
+            const newLongRange = (state.longitudeMax - state.longitudeMin) * zoomFactor;
+            const newLatRange = (state.latitudeMax - state.latitudeMin) * zoomFactor;
 
             // Limit zoom (don't zoom in too much or out too much)
             const minRange = 5;  // minimum 5m range
@@ -734,24 +761,29 @@
             if (newLongRange > maxLongRange * 2 || newLatRange > maxLatRange * 2) return;
 
             // Calculate new bounds centered on mouse position
-            const longRatio = (mouseLong - longitudeMin) / (longitudeMax - longitudeMin);
-            const latRatio = (mouseLat - latitudeMin) / (latitudeMax - latitudeMin);
+            const longRatio = (mouseLong - state.longitudeMin) / (state.longitudeMax - state.longitudeMin);
+            const latRatio = (mouseLat - state.latitudeMin) / (state.latitudeMax - state.latitudeMin);
 
-            longitudeMin = mouseLong - newLongRange * longRatio;
-            longitudeMax = mouseLong + newLongRange * (1 - longRatio);
-            latitudeMin = mouseLat - newLatRange * latRatio;
-            latitudeMax = mouseLat + newLatRange * (1 - latRatio);
+            state.longitudeMin = mouseLong - newLongRange * longRatio;
+            state.longitudeMax = mouseLong + newLongRange * (1 - longRatio);
+            state.latitudeMin = mouseLat - newLatRange * latRatio;
+            state.latitudeMax = mouseLat + newLatRange * (1 - latRatio);
 
-            // Redraw all devices
-            redrawAllDevices();
+            // Redraw only this device
+            redrawDevice(deviceName);
         }
 
-        // Reset zoom to default
+        // Reset zoom to default for all devices
         function resetZoom() {
-            longitudeMin = DEFAULT_LONGITUDE_MIN;
-            longitudeMax = DEFAULT_LONGITUDE_MAX;
-            latitudeMin = DEFAULT_LATITUDE_MIN;
-            latitudeMax = DEFAULT_LATITUDE_MAX;
+            devices.forEach(deviceName => {
+                const state = deviceViewStates[deviceName];
+                if (state) {
+                    state.longitudeMin = DEFAULT_LONGITUDE_MIN;
+                    state.longitudeMax = DEFAULT_LONGITUDE_MAX;
+                    state.latitudeMin = DEFAULT_LATITUDE_MIN;
+                    state.latitudeMax = DEFAULT_LATITUDE_MAX;
+                }
+            });
             redrawAllDevices();
         }
 
@@ -834,22 +866,14 @@
         function toggleGrid() {
             showGrid = !showGrid;
             devices.forEach(deviceName => {
-                const canvas = document.getElementById(`canvas-${deviceName}`);
-                if (canvas) {
-                    const ctx = canvas.getContext('2d');
-                    drawBackground(ctx, canvas.width, canvas.height);
-                }
+                redrawDevice(deviceName);
             });
         }
 
         function toggleAxes() {
             showAxes = !showAxes;
             devices.forEach(deviceName => {
-                const canvas = document.getElementById(`canvas-${deviceName}`);
-                if (canvas) {
-                    const ctx = canvas.getContext('2d');
-                    drawBackground(ctx, canvas.width, canvas.height);
-                }
+                redrawDevice(deviceName);
             });
         }
 
@@ -858,7 +882,7 @@
                 const canvas = document.getElementById(`canvas-${deviceName}`);
                 if (canvas) {
                     const ctx = canvas.getContext('2d');
-                    drawBackground(ctx, canvas.width, canvas.height);
+                    drawBackground(ctx, canvas.width, canvas.height, deviceName);
                 }
                 document.getElementById(`count-${deviceName}`).textContent = '0';
                 document.getElementById(`last-update-${deviceName}`).textContent = '';
@@ -866,8 +890,16 @@
         }
 
         function resetAll() {
-            // Reset zoom
-            resetZoom();
+            // Reset zoom for all devices
+            devices.forEach(deviceName => {
+                const state = deviceViewStates[deviceName];
+                if (state) {
+                    state.longitudeMin = DEFAULT_LONGITUDE_MIN;
+                    state.longitudeMax = DEFAULT_LONGITUDE_MAX;
+                    state.latitudeMin = DEFAULT_LATITUDE_MIN;
+                    state.latitudeMax = DEFAULT_LATITUDE_MAX;
+                }
+            });
             // Clear all points
             devicePoints = {};
             // Reset grid and axes to visible
@@ -878,7 +910,7 @@
                 const canvas = document.getElementById(`canvas-${deviceName}`);
                 if (canvas) {
                     const ctx = canvas.getContext('2d');
-                    drawBackground(ctx, canvas.width, canvas.height);
+                    drawBackground(ctx, canvas.width, canvas.height, deviceName);
                 }
                 document.getElementById(`count-${deviceName}`).textContent = '0';
                 document.getElementById(`last-update-${deviceName}`).textContent = '';
