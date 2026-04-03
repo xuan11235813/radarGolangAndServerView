@@ -279,12 +279,15 @@
         // Fetch configuration
         async function loadConfig() {
             try {
-                const response = await fetch(CONFIG_URL);
+                const response = await fetch(CONFIG_URL + '?t=' + Date.now()); // Add timestamp to prevent caching
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 const config = await response.json();
                 devices = config.devices || [];
+
+                console.log('Loaded config:', config);
+                console.log('Devices array:', devices);
 
                 if (devices.length === 0) {
                     showError('No devices found in configuration');
@@ -308,7 +311,10 @@
             const container = document.getElementById('container');
             container.innerHTML = '';
 
-            devices.forEach(deviceName => {
+            console.log('Creating device columns for', devices.length, 'devices:', devices);
+
+            devices.forEach((deviceName, index) => {
+                console.log(`Creating column ${index} for device: ${deviceName}`);
                 const column = document.createElement('div');
                 column.className = 'device-column';
                 column.id = `device-${deviceName}`;
@@ -326,6 +332,7 @@
                     </div>
                 `;
                 container.appendChild(column);
+                console.log(`Appended column for ${deviceName}, container now has ${container.children.length} children`);
 
                 // Initialize canvas
                 initCanvas(deviceName);
