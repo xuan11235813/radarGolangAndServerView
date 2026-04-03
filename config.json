@@ -1,5 +1,6 @@
 {
     "devices": [
-        "can0"
+        "can0",
+        "can1"
     ]
 }
