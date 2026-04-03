@@ -290,7 +290,6 @@
         <button class="control-btn secondary" onclick="resetZoom()">Reset Zoom</button>
         <button class="control-btn primary" onclick="resetAll()">Reset All</button>
         <button class="control-btn primary" onclick="reconnectAll()">Reconnect All</button>
-        <button class="control-btn primary" id="sim-btn" onclick="toggleSimulation()">Start Simulation</button>
     </div>
 
     <div id="container" class="container">
@@ -1033,20 +1032,127 @@
             lastMouseY: 0
         };
 
-        // Simulation state
+        // Random flying target simulation
         let simulation = {
-            running: false,
             target: {
                 id: 1,
-                x: 20,
-                y: 20,
+                x: 0,
+                y: 0,
                 z: 100,
                 rcs: 0.5
             },
-            startTime: 0,
-            duration: 30000,  // 30 seconds for full spiral
-            animationId: null
+            // Velocity for smooth movement
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            // Target position to fly towards
+            targetX: 0,
+            targetY: 0,
+            targetZ: 100,
+            // Bounds
+            minX: -30, maxX: 30,
+            minY: -30, maxY: 30,
+            minZ: 5, maxZ: 200,
+            // Movement parameters
+            speed: 0.05,  // 10x slower
+            directionChangeInterval: 3000,  // Change direction every 3 seconds
+            lastDirectionChange: 0,
+            animationId: null,
+            // Trail for visualization (30 seconds at ~60fps = 1800 positions)
+            trail: [],
+            maxTrailLength: 1800
         };
+
+        // Initialize random target position
+        function initRandomTarget() {
+            simulation.target.x = (Math.random() - 0.5) * 40;
+            simulation.target.y = (Math.random() - 0.5) * 40;
+            simulation.target.z = 50 + Math.random() * 100;
+            simulation.target.rcs = 0.3 + Math.random() * 0.4;
+
+            // Set initial velocity
+            simulation.vx = (Math.random() - 0.5) * 2;
+            simulation.vy = (Math.random() - 0.5) * 2;
+            simulation.vz = (Math.random() - 0.5) * 1;
+
+            setNewRandomTarget();
+        }
+
+        // Set a new random target position to fly towards
+        function setNewRandomTarget() {
+            simulation.targetX = simulation.minX + Math.random() * (simulation.maxX - simulation.minX);
+            simulation.targetY = simulation.minY + Math.random() * (simulation.maxY - simulation.minY);
+            simulation.targetZ = simulation.minZ + Math.random() * (simulation.maxZ - simulation.minZ);
+        }
+
+        // Update target position with smooth random movement
+        function updateRandomTarget() {
+            const now = Date.now();
+
+            // Add current position to trail before updating
+            simulation.trail.push({
+                x: simulation.target.x,
+                y: simulation.target.y,
+                z: simulation.target.z
+            });
+
+            // Limit trail length
+            if (simulation.trail.length > simulation.maxTrailLength) {
+                simulation.trail.shift();
+            }
+
+            // Change direction periodically
+            if (now - simulation.lastDirectionChange > simulation.directionChangeInterval) {
+                setNewRandomTarget();
+                simulation.lastDirectionChange = now;
+            }
+
+            // Calculate direction to target
+            const dx = simulation.targetX - simulation.target.x;
+            const dy = simulation.targetY - simulation.target.y;
+            const dz = simulation.targetZ - simulation.target.z;
+
+            // Smoothly adjust velocity towards target (10x slower)
+            simulation.vx += dx * 0.0001;
+            simulation.vy += dy * 0.0001;
+            simulation.vz += dz * 0.0001;
+
+            // Add some random noise for more natural movement (10x slower)
+            simulation.vx += (Math.random() - 0.5) * 0.01;
+            simulation.vy += (Math.random() - 0.5) * 0.01;
+            simulation.vz += (Math.random() - 0.5) * 0.005;
+
+            // Limit velocity (10x slower)
+            const maxV = 0.15;
+            simulation.vx = Math.max(-maxV, Math.min(maxV, simulation.vx));
+            simulation.vy = Math.max(-maxV, Math.min(maxV, simulation.vy));
+            simulation.vz = Math.max(-maxV * 0.5, Math.min(maxV * 0.5, simulation.vz));
+
+            // Update position
+            simulation.target.x += simulation.vx;
+            simulation.target.y += simulation.vy;
+            simulation.target.z += simulation.vz;
+
+            // Bounce off boundaries
+            if (simulation.target.x < simulation.minX || simulation.target.x > simulation.maxX) {
+                simulation.vx *= -0.8;
+                simulation.target.x = Math.max(simulation.minX, Math.min(simulation.maxX, simulation.target.x));
+                setNewRandomTarget();
+            }
+            if (simulation.target.y < simulation.minY || simulation.target.y > simulation.maxY) {
+                simulation.vy *= -0.8;
+                simulation.target.y = Math.max(simulation.minY, Math.min(simulation.maxY, simulation.target.y));
+                setNewRandomTarget();
+            }
+            if (simulation.target.z < simulation.minZ || simulation.target.z > simulation.maxZ) {
+                simulation.vz *= -0.8;
+                simulation.target.z = Math.max(simulation.minZ, Math.min(simulation.maxZ, simulation.target.z));
+                setNewRandomTarget();
+            }
+
+            // Update RCS with slight variation
+            simulation.target.rcs = 0.3 + Math.random() * 0.4;
+        }
 
         // 3D canvas initialization
         function init3DCanvas() {
@@ -1069,8 +1175,23 @@
                 if (e.button === 1) e.preventDefault();
             });
 
+            // Initialize and start random target simulation
+            initRandomTarget();
+            startRandomSimulation();
+
             // Initial draw
             draw3DScene();
+        }
+
+        // Animation loop for random flying target
+        function startRandomSimulation() {
+            function animate() {
+                updateRandomTarget();
+                updateTargetTable();
+                draw3DScene();
+                simulation.animationId = requestAnimationFrame(animate);
+            }
+            animate();
         }
 
         function handle3DMouseDown(event) {
@@ -1311,61 +1432,27 @@
             const target = simulation.target;
             const pos = project3D(target.x, target.y, target.z, canvas);
 
-            // Spiral parameters - must match animateSimulation
-            const totalRotations = 4;
-            const totalPoints = 200;
+            // Draw trail (last 50 positions)
+            if (simulation.trail && simulation.trail.length > 1) {
+                ctx.strokeStyle = 'rgba(233, 69, 96, 0.4)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
 
-            // Draw full spiral path (faded)
-            ctx.strokeStyle = 'rgba(100, 100, 100, 0.2)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
+                for (let i = 0; i < simulation.trail.length; i++) {
+                    const trailPos = project3D(
+                        simulation.trail[i].x,
+                        simulation.trail[i].y,
+                        simulation.trail[i].z,
+                        canvas
+                    );
 
-            for (let i = 0; i <= totalPoints; i++) {
-                const t = i / totalPoints;
-                const angle = t * totalRotations * 2 * Math.PI;
-                const radius = 20 * (1 - t);
-                const z = 100 * (1 - t);
-
-                const trailX = radius * Math.cos(angle);
-                const trailY = radius * Math.sin(angle);
-                const trailPos = project3D(trailX, trailY, z, canvas);
-
-                if (i === 0) {
-                    ctx.moveTo(trailPos.x, trailPos.y);
-                } else {
-                    ctx.lineTo(trailPos.x, trailPos.y);
-                }
-            }
-            ctx.stroke();
-
-            // Draw traveled path (bright) - drone leads the path
-            if (simulation.running) {
-                const progress = (Date.now() - simulation.startTime) / simulation.duration;
-                const pointsToDraw = Math.floor(progress * totalPoints);
-
-                if (pointsToDraw > 0) {
-                    ctx.strokeStyle = 'rgba(233, 69, 96, 0.8)';
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-
-                    for (let i = 0; i <= pointsToDraw; i++) {
-                        const t = i / totalPoints;
-                        const angle = t * totalRotations * 2 * Math.PI;
-                        const radius = 20 * (1 - t);
-                        const z = 100 * (1 - t);
-
-                        const trailX = radius * Math.cos(angle);
-                        const trailY = radius * Math.sin(angle);
-                        const trailPos = project3D(trailX, trailY, z, canvas);
-
-                        if (i === 0) {
-                            ctx.moveTo(trailPos.x, trailPos.y);
-                        } else {
-                            ctx.lineTo(trailPos.x, trailPos.y);
-                        }
+                    if (i === 0) {
+                        ctx.moveTo(trailPos.x, trailPos.y);
+                    } else {
+                        ctx.lineTo(trailPos.x, trailPos.y);
                     }
-                    ctx.stroke();
                 }
+                ctx.stroke();
             }
 
             // Draw realistic drone
