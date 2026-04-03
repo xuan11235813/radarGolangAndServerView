@@ -108,13 +108,70 @@
 
         .container {
             display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
+            flex-wrap: nowrap;
+            justify-content: flex-start;
             align-content: flex-start;
             gap: 10px;
             padding: 10px;
             flex: 1;
-            overflow-y: auto;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        .tracking-column {
+            background-color: #16213e;
+            border-radius: 8px;
+            padding: 8px;
+            border: 1px solid #0f3460;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            width: 600px;
+            height: calc(100vh - 120px);
+        }
+
+        .tracking-header {
+            font-size: 1rem;
+            font-weight: bold;
+            color: #e94560;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #0f3460;
+            margin-bottom: 8px;
+        }
+
+        .tracked-targets-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.75rem;
+            margin-bottom: 8px;
+        }
+
+        .tracked-targets-table th {
+            background-color: #0f3460;
+            padding: 6px 4px;
+            text-align: center;
+            color: #4ade80;
+            font-weight: bold;
+        }
+
+        .tracked-targets-table td {
+            padding: 5px 4px;
+            text-align: center;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .tracked-targets-table tr:hover {
+            background-color: #1a1a3e;
+        }
+
+        .canvas-3d-container {
+            position: relative;
+            background-color: #0f0f23;
+            border-radius: 6px;
+            overflow: hidden;
+            flex: 0 0 auto;
+            height: 500px;
+            width: 100%;
         }
 
         .device-column {
@@ -233,9 +290,11 @@
         <button class="control-btn secondary" onclick="resetZoom()">Reset Zoom</button>
         <button class="control-btn primary" onclick="resetAll()">Reset All</button>
         <button class="control-btn primary" onclick="reconnectAll()">Reconnect All</button>
+        <button class="control-btn primary" id="sim-btn" onclick="toggleSimulation()">Start Simulation</button>
     </div>
 
     <div id="container" class="container">
+        <!-- Tracking column will be inserted here -->
         <div class="loading">Loading configuration...</div>
     </div>
 
@@ -327,6 +386,7 @@
 
             console.log('Creating device columns for', devices.length, 'devices:', devices);
 
+            // Create device columns first
             devices.forEach((deviceName, index) => {
                 console.log(`Creating column ${index} for device: ${deviceName}`);
                 const column = document.createElement('div');
@@ -351,6 +411,40 @@
                 // Initialize canvas
                 initCanvas(deviceName);
             });
+
+            // Create tracking column on the right
+            const trackingColumn = document.createElement('div');
+            trackingColumn.className = 'tracking-column';
+            trackingColumn.innerHTML = `
+                <div class="tracking-header">Tracked Targets</div>
+                <table class="tracked-targets-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>X</th>
+                            <th>Y</th>
+                            <th>Z</th>
+                            <th>RCS</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tracked-targets-body">
+                        <tr id="target-row-1">
+                            <td>1</td>
+                            <td id="target-1-x">20.0</td>
+                            <td id="target-1-y">20.0</td>
+                            <td id="target-1-z">100.0</td>
+                            <td id="target-1-rcs">0.5</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="canvas-3d-container">
+                    <canvas id="canvas-3d"></canvas>
+                </div>
+            `;
+            container.appendChild(trackingColumn);
+
+            // Initialize 3D canvas
+            init3DCanvas();
 
             // Handle window resize
             window.addEventListener('resize', handleResize);
@@ -925,6 +1019,551 @@
             });
             setTimeout(connectAllDevices, 500);
         }
+
+        // ============ 3D Canvas and Simulation ============
+
+        // 3D view state
+        let view3D = {
+            rotationX: 0.5,  // Pitch (radians) - 0 = side view (X-Y plane as line), PI/2 = top view (Z as point)
+            rotationY: 0.5,   // Yaw (radians)
+            offsetY: 0,       // Vertical offset for panning
+            isDragging: false,
+            isPanning: false, // Middle button panning
+            lastMouseX: 0,
+            lastMouseY: 0
+        };
+
+        // Simulation state
+        let simulation = {
+            running: false,
+            target: {
+                id: 1,
+                x: 20,
+                y: 20,
+                z: 100,
+                rcs: 0.5
+            },
+            startTime: 0,
+            duration: 30000,  // 30 seconds for full spiral
+            animationId: null
+        };
+
+        // 3D canvas initialization
+        function init3DCanvas() {
+            const canvas = document.getElementById('canvas-3d');
+            const container = canvas.parentElement;
+
+            // Set canvas size
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+
+            // Mouse events for rotation and panning
+            canvas.addEventListener('mousedown', handle3DMouseDown);
+            canvas.addEventListener('mousemove', handle3DMouseMove);
+            canvas.addEventListener('mouseup', handle3DMouseUp);
+            canvas.addEventListener('mouseleave', handle3DMouseUp);
+            canvas.addEventListener('contextmenu', (e) => e.preventDefault());  // Prevent context menu
+
+            // Prevent default middle button scroll behavior
+            canvas.addEventListener('auxclick', (e) => {
+                if (e.button === 1) e.preventDefault();
+            });
+
+            // Initial draw
+            draw3DScene();
+        }
+
+        function handle3DMouseDown(event) {
+            if (event.button === 0) {
+                // Left button - rotation
+                view3D.isDragging = true;
+                view3D.lastMouseX = event.clientX;
+                view3D.lastMouseY = event.clientY;
+                event.target.style.cursor = 'grabbing';
+            } else if (event.button === 1) {
+                // Middle button - pan vertical
+                view3D.isPanning = true;
+                view3D.lastMouseY = event.clientY;
+                event.target.style.cursor = 'ns-resize';
+                event.preventDefault();  // Prevent default middle button behavior
+            }
+        }
+
+        function handle3DMouseMove(event) {
+            if (view3D.isDragging) {
+                // Rotation with left button
+                const deltaX = event.clientX - view3D.lastMouseX;
+                const deltaY = event.clientY - view3D.lastMouseY;
+
+                view3D.rotationY += deltaX * 0.01;
+                view3D.rotationX += deltaY * 0.01;
+
+                // Clamp rotation:
+                // - Lower limit (0): X-Y plane becomes a line (side view)
+                // - Upper limit (PI/2): Z axis becomes a point (top view)
+                // Allow reaching exactly 0 for side view, leave small margin for top view
+                view3D.rotationX = Math.max(0, Math.min(Math.PI / 2 - 0.02, view3D.rotationX));
+
+                view3D.lastMouseX = event.clientX;
+                view3D.lastMouseY = event.clientY;
+
+                draw3DScene();
+            } else if (view3D.isPanning) {
+                // Vertical panning with middle button
+                const deltaY = event.clientY - view3D.lastMouseY;
+                view3D.offsetY += deltaY;
+
+                view3D.lastMouseY = event.clientY;
+                draw3DScene();
+            }
+        }
+
+        function handle3DMouseUp(event) {
+            if (view3D.isDragging) {
+                view3D.isDragging = false;
+                if (event.target) {
+                    event.target.style.cursor = 'grab';
+                }
+            }
+            if (view3D.isPanning) {
+                view3D.isPanning = false;
+                if (event.target) {
+                    event.target.style.cursor = 'grab';
+                }
+            }
+        }
+
+        // 3D projection functions
+        // rotationX: 0 = side view (X-Y plane as line), PI/2 = top view (Z axis as point)
+        function project3D(x, y, z, canvas) {
+            // Center of the view with vertical offset for panning
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2 + view3D.offsetY;
+
+            // Scale factors - same for X and Y to maintain orthogonal grid
+            const scaleXY = Math.min(canvas.width, canvas.height) / 150;  // X and Y scale (equal)
+            const scaleZ = Math.min(canvas.width, canvas.height) / 300;   // Z scale (denser, for higher altitudes)
+
+            // rotationX controls the view angle from side (0) to top (PI/2)
+            // At rotationX = 0: looking from the side, X-Y plane appears as a line
+            // At rotationX = PI/2: looking from above, Z axis appears as a point
+            const angle = view3D.rotationX;
+            const cosA = Math.cos(angle);
+            const sinA = Math.sin(angle);
+
+            // rotationY controls the rotation around Z axis (yaw)
+            const cosY = Math.cos(view3D.rotationY);
+            const sinY = Math.sin(view3D.rotationY);
+
+            // First rotate around Z axis (yaw) - this rotates the X-Y plane
+            let x1 = x * cosY - y * sinY;
+            let y1 = x * sinY + y * cosY;
+            let z1 = z;
+
+            // Then apply the view angle rotation
+            // This tilts the view from side (angle=0) to top (angle=PI/2)
+            // At angle=0: we see X and Z (Y is collapsed)
+            // At angle=PI/2: we see X and Y (Z is collapsed)
+            let x2 = x1;
+            let y2 = y1 * cosA + z1 * sinA;  // Y component in view
+            let z2 = -y1 * sinA + z1 * cosA; // Z component (depth)
+
+            // Orthographic-like projection with slight perspective
+            const perspective = 500;
+            const factor = perspective / (perspective + z2 * 0.3);
+
+            // Project to 2D
+            // At angle=0: x2 maps to screen X, y2 maps to screen Y (shows X-Z plane)
+            // At angle=PI/2: x2 maps to screen X, y2 maps to screen Y (shows X-Y plane)
+            const projectedX = centerX + x2 * scaleXY * factor;
+            const projectedY = centerY - y2 * scaleXY * factor;
+
+            return {
+                x: projectedX,
+                y: projectedY,
+                z: z2
+            };
+        }
+
+        // Draw 3D scene
+        function draw3DScene() {
+            const canvas = document.getElementById('canvas-3d');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // Clear canvas
+            ctx.fillStyle = COLORS.background;
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw grid on X-Y plane at Z=0 (bottom)
+            draw3DGrid(ctx, canvas);
+
+            // Draw 3D axes
+            draw3DAxes(ctx, canvas);
+
+            // Draw Z axis markers
+            draw3DZMarkers(ctx, canvas);
+
+            // Draw target (drone)
+            draw3DTarget(ctx, canvas);
+        }
+
+        function draw3DAxes(ctx, canvas) {
+            const axisLengthXY = 60;
+            const axisLengthZ = 200;
+
+            // Origin
+            const origin = project3D(0, 0, 0, canvas);
+
+            // X axis (red)
+            const xEnd = project3D(axisLengthXY, 0, 0, canvas);
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(origin.x, origin.y);
+            ctx.lineTo(xEnd.x, xEnd.y);
+            ctx.stroke();
+
+            // X label
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '12px Arial';
+            ctx.fillText('X', xEnd.x + 5, xEnd.y);
+
+            // Y axis (green)
+            const yEnd = project3D(0, axisLengthXY, 0, canvas);
+            ctx.strokeStyle = '#4ade80';
+            ctx.beginPath();
+            ctx.moveTo(origin.x, origin.y);
+            ctx.lineTo(yEnd.x, yEnd.y);
+            ctx.stroke();
+
+            // Y label
+            ctx.fillStyle = '#4ade80';
+            ctx.fillText('Y', yEnd.x + 5, yEnd.y);
+
+            // Z axis (blue) - pointing up
+            const zEnd = project3D(0, 0, axisLengthZ, canvas);
+            ctx.strokeStyle = '#60a5fa';
+            ctx.beginPath();
+            ctx.moveTo(origin.x, origin.y);
+            ctx.lineTo(zEnd.x, zEnd.y);
+            ctx.stroke();
+
+            // Z label
+            ctx.fillStyle = '#60a5fa';
+            ctx.fillText('Z', zEnd.x + 5, zEnd.y);
+        }
+
+        function draw3DGrid(ctx, canvas) {
+            ctx.strokeStyle = '#1a1a3e';
+            ctx.lineWidth = 1;
+
+            // Draw grid lines on X-Y plane at Z=0 (bottom surface)
+            // Grid from -60 to 60 to match larger axis
+            for (let i = -60; i <= 60; i += 20) {
+                // Lines parallel to X axis
+                const start1 = project3D(-60, i, 0, canvas);
+                const end1 = project3D(60, i, 0, canvas);
+                ctx.beginPath();
+                ctx.moveTo(start1.x, start1.y);
+                ctx.lineTo(end1.x, end1.y);
+                ctx.stroke();
+
+                // Lines parallel to Y axis
+                const start2 = project3D(i, -60, 0, canvas);
+                const end2 = project3D(i, 60, 0, canvas);
+                ctx.beginPath();
+                ctx.moveTo(start2.x, start2.y);
+                ctx.lineTo(end2.x, end2.y);
+                ctx.stroke();
+            }
+        }
+
+        function draw3DZMarkers(ctx, canvas) {
+            ctx.strokeStyle = '#1a1a3e';
+            ctx.lineWidth = 1;
+
+            // Draw Z axis markers with denser measures
+            // Every 20m for 0-100, every 50m for 100-250
+            const zMarkers = [0, 20, 40, 60, 80, 100, 150, 200, 250];
+
+            for (const z of zMarkers) {
+                // Draw horizontal tick mark
+                const start = project3D(-3, 0, z, canvas);
+                const end = project3D(3, 0, z, canvas);
+                ctx.beginPath();
+                ctx.moveTo(start.x, start.y);
+                ctx.lineTo(end.x, end.y);
+                ctx.stroke();
+
+                // Z value label
+                ctx.fillStyle = '#666';
+                ctx.font = '10px Arial';
+                const labelPos = project3D(-5, 0, z, canvas);
+                ctx.fillText(z.toString() + 'm', labelPos.x - 25, labelPos.y);
+            }
+        }
+
+        function draw3DTarget(ctx, canvas) {
+            const target = simulation.target;
+            const pos = project3D(target.x, target.y, target.z, canvas);
+
+            // Spiral parameters - must match animateSimulation
+            const totalRotations = 4;
+            const totalPoints = 200;
+
+            // Draw full spiral path (faded)
+            ctx.strokeStyle = 'rgba(100, 100, 100, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            for (let i = 0; i <= totalPoints; i++) {
+                const t = i / totalPoints;
+                const angle = t * totalRotations * 2 * Math.PI;
+                const radius = 20 * (1 - t);
+                const z = 100 * (1 - t);
+
+                const trailX = radius * Math.cos(angle);
+                const trailY = radius * Math.sin(angle);
+                const trailPos = project3D(trailX, trailY, z, canvas);
+
+                if (i === 0) {
+                    ctx.moveTo(trailPos.x, trailPos.y);
+                } else {
+                    ctx.lineTo(trailPos.x, trailPos.y);
+                }
+            }
+            ctx.stroke();
+
+            // Draw traveled path (bright) - drone leads the path
+            if (simulation.running) {
+                const progress = (Date.now() - simulation.startTime) / simulation.duration;
+                const pointsToDraw = Math.floor(progress * totalPoints);
+
+                if (pointsToDraw > 0) {
+                    ctx.strokeStyle = 'rgba(233, 69, 96, 0.8)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+
+                    for (let i = 0; i <= pointsToDraw; i++) {
+                        const t = i / totalPoints;
+                        const angle = t * totalRotations * 2 * Math.PI;
+                        const radius = 20 * (1 - t);
+                        const z = 100 * (1 - t);
+
+                        const trailX = radius * Math.cos(angle);
+                        const trailY = radius * Math.sin(angle);
+                        const trailPos = project3D(trailX, trailY, z, canvas);
+
+                        if (i === 0) {
+                            ctx.moveTo(trailPos.x, trailPos.y);
+                        } else {
+                            ctx.lineTo(trailPos.x, trailPos.y);
+                        }
+                    }
+                    ctx.stroke();
+                }
+            }
+
+            // Draw realistic drone
+            drawDrone(ctx, pos.x, pos.y, target.z);
+        }
+
+        // Draw a more realistic drone
+        function drawDrone(ctx, x, y, altitude) {
+            const time = Date.now();
+            const propellerSpeed = altitude > 0 ? 0.3 : 0.05;  // Faster propellers when flying
+
+            // Drone body (central hub)
+            ctx.fillStyle = '#2a2a4a';
+            ctx.beginPath();
+            ctx.ellipse(x, y, 8, 6, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Drone body outline
+            ctx.strokeStyle = '#4a4a6a';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.ellipse(x, y, 8, 6, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Four arms and propellers
+            const armLength = 14;
+            const armAngles = [Math.PI / 4, 3 * Math.PI / 4, 5 * Math.PI / 4, 7 * Math.PI / 4];  // X configuration
+
+            for (let i = 0; i < 4; i++) {
+                const armAngle = armAngles[i];
+                const motorX = x + Math.cos(armAngle) * armLength;
+                const motorY = y + Math.sin(armAngle) * armLength * 0.7;  // Slightly flattened perspective
+
+                // Draw arm
+                ctx.strokeStyle = '#3a3a5a';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(motorX, motorY);
+                ctx.stroke();
+
+                // Motor housing
+                ctx.fillStyle = '#1a1a3a';
+                ctx.beginPath();
+                ctx.arc(motorX, motorY, 3, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Propeller disc (spinning effect)
+                const propAngle = time * propellerSpeed + i * Math.PI / 2;
+                ctx.strokeStyle = 'rgba(100, 200, 255, 0.4)';
+                ctx.lineWidth = 1;
+
+                // Draw propeller blades
+                for (let b = 0; b < 2; b++) {
+                    const bladeAngle = propAngle + b * Math.PI;
+                    const bladeLen = 8;
+                    ctx.beginPath();
+                    ctx.moveTo(
+                        motorX - Math.cos(bladeAngle) * bladeLen,
+                        motorY - Math.sin(bladeAngle) * bladeLen * 0.5
+                    );
+                    ctx.lineTo(
+                        motorX + Math.cos(bladeAngle) * bladeLen,
+                        motorY + Math.sin(bladeAngle) * bladeLen * 0.5
+                    );
+                    ctx.stroke();
+                }
+
+                // Propeller glow
+                ctx.fillStyle = 'rgba(100, 200, 255, 0.15)';
+                ctx.beginPath();
+                ctx.ellipse(motorX, motorY, 8, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // LED lights on front arms (for orientation)
+            ctx.fillStyle = '#00ff00';
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(armAngles[0]) * armLength, y + Math.sin(armAngles[0]) * armLength * 0.7, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(armAngles[1]) * armLength, y + Math.sin(armAngles[1]) * armLength * 0.7, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Red LEDs on back arms
+            ctx.fillStyle = '#ff0000';
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(armAngles[2]) * armLength, y + Math.sin(armAngles[2]) * armLength * 0.7, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(armAngles[3]) * armLength, y + Math.sin(armAngles[3]) * armLength * 0.7, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Altitude indicator
+            ctx.fillStyle = '#fff';
+            ctx.font = '9px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${altitude.toFixed(0)}m`, x, y - 18);
+
+            // Target ID
+            ctx.fillStyle = '#4ade80';
+            ctx.font = 'bold 10px Arial';
+            ctx.fillText(`T${simulation.target.id}`, x, y + 25);
+        }
+
+        // Simulation functions
+        function toggleSimulation() {
+            const btn = document.getElementById('sim-btn');
+
+            if (simulation.running) {
+                stopSimulation();
+                btn.textContent = 'Start Simulation';
+            } else {
+                startSimulation();
+                btn.textContent = 'Stop Simulation';
+            }
+        }
+
+        function startSimulation() {
+            simulation.running = true;
+            simulation.startTime = Date.now();
+            simulation.target = {
+                id: 1,
+                x: 20,
+                y: 20,
+                z: 100,
+                rcs: 0.5
+            };
+
+            animateSimulation();
+        }
+
+        function stopSimulation() {
+            simulation.running = false;
+            if (simulation.animationId) {
+                cancelAnimationFrame(simulation.animationId);
+            }
+        }
+
+        function animateSimulation() {
+            if (!simulation.running) return;
+
+            const elapsed = Date.now() - simulation.startTime;
+            const progress = Math.min(elapsed / simulation.duration, 1);
+
+            // Spiral path: starts at (20, 20, 100), spirals down to (0, 0, 0)
+            // Must match draw3DTarget: totalRotations = 4, so angle = progress * 4 * 2 * PI
+            const totalRotations = 4;
+            const angle = progress * totalRotations * 2 * Math.PI;
+            const radius = 20 * (1 - progress);
+            const z = 100 * (1 - progress);
+
+            simulation.target.x = radius * Math.cos(angle);
+            simulation.target.y = radius * Math.sin(angle);
+            simulation.target.z = z;
+            simulation.target.rcs = 0.5 + Math.random() * 0.1;  // Slight RCS variation
+
+            // Update table
+            updateTargetTable();
+
+            // Redraw 3D scene
+            draw3DScene();
+
+            // Continue or reset
+            if (progress < 1) {
+                simulation.animationId = requestAnimationFrame(animateSimulation);
+            } else {
+                // Reset and restart
+                setTimeout(() => {
+                    if (simulation.running) {
+                        simulation.startTime = Date.now();
+                        animateSimulation();
+                    }
+                }, 2000);
+            }
+        }
+
+        function updateTargetTable() {
+            const target = simulation.target;
+            document.getElementById('target-1-x').textContent = target.x.toFixed(1);
+            document.getElementById('target-1-y').textContent = target.y.toFixed(1);
+            document.getElementById('target-1-z').textContent = target.z.toFixed(1);
+            document.getElementById('target-1-rcs').textContent = target.rcs.toFixed(2);
+        }
+
+        // Handle window resize for 3D canvas
+        const originalHandleResize = handleResize;
+        handleResize = function () {
+            originalHandleResize();
+
+            const canvas3D = document.getElementById('canvas-3d');
+            if (canvas3D) {
+                const container = canvas3D.parentElement;
+                canvas3D.width = container.clientWidth;
+                canvas3D.height = container.clientHeight;
+                draw3DScene();
+            }
+        };
 
         // Initialize
         loadConfig();
