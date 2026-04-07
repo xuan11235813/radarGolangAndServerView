@@ -69,7 +69,7 @@ type WebSocketServer struct {
 	Port          int
 	Clients       map[*websocket.Conn]bool
 	ClientMutex   sync.RWMutex
-	BroadcastChan chan []Point2D
+	BroadcastChan chan [][]Point2D // Channel of multiple frames, each frame is []Point2D
 }
 
 // GetCurrentTimestampMillis returns the current UTC timestamp in milliseconds
@@ -201,7 +201,7 @@ func clusteringServer(config *Config, done <-chan struct{}) {
 			InterfaceName: deviceName,
 			Port:          1999, // Same port for all devices
 			Clients:       make(map[*websocket.Conn]bool),
-			BroadcastChan: make(chan []Point2D, 100),
+			BroadcastChan: make(chan [][]Point2D, 100),
 		}
 		wsServers[deviceName] = wsServer
 
@@ -214,22 +214,25 @@ func clusteringServer(config *Config, done <-chan struct{}) {
 	// Start broadcast goroutines for each device
 	for _, wsServer := range wsServers {
 		go func(server *WebSocketServer) {
-			for points := range server.BroadcastChan {
-				server.ClientMutex.RLock()
-				for conn := range server.Clients {
-					// Send points as JSON
-					err := websocket.JSON.Send(conn, points)
-					if err != nil {
-						log.Printf("Error sending to websocket client: %v", err)
-						conn.Close()
-						server.ClientMutex.RUnlock()
-						server.ClientMutex.Lock()
-						delete(server.Clients, conn)
-						server.ClientMutex.Unlock()
-						server.ClientMutex.RLock()
+			for frames := range server.BroadcastChan {
+				// Send each frame separately to websocket clients
+				for _, points := range frames {
+					server.ClientMutex.RLock()
+					for conn := range server.Clients {
+						// Send points as JSON
+						err := websocket.JSON.Send(conn, points)
+						if err != nil {
+							log.Printf("Error sending to websocket client: %v", err)
+							conn.Close()
+							server.ClientMutex.RUnlock()
+							server.ClientMutex.Lock()
+							delete(server.Clients, conn)
+							server.ClientMutex.Unlock()
+							server.ClientMutex.RLock()
+						}
 					}
+					server.ClientMutex.RUnlock()
 				}
-				server.ClientMutex.RUnlock()
 			}
 		}(wsServer)
 	}
@@ -279,9 +282,9 @@ func clusteringServer(config *Config, done <-chan struct{}) {
 				})
 			}
 
-			// Send to broadcast channel (non-blocking)
+			// Send to broadcast channel as a single frame wrapped in a slice (non-blocking)
 			select {
-			case wsServer.BroadcastChan <- points:
+			case wsServer.BroadcastChan <- [][]Point2D{points}:
 				// Successfully queued for broadcast
 			default:
 				log.Printf("Warning: Broadcast channel full for device %s", frame.InterfaceName)
